@@ -30,16 +30,13 @@ type simpleLogin struct {
 	currentIndex int
 }
 
-func (sl *simpleLogin) nextAccount() bool {
-	defer func() {
-		slog.Info("SL: use next account", slog.Int("index", sl.currentIndex), slog.String("forward", sl.accounts[sl.currentIndex].forward))
-	}()
-	sl.currentIndex++
-	if sl.currentIndex >= len(sl.accounts) {
-		sl.currentIndex = 0
-		return false
-	}
-	return true
+func (sl *simpleLogin) nextAccount() {
+	sl.currentIndex = (sl.currentIndex + 1) % len(sl.accounts)
+	slog.Info(
+		"SL: use next account",
+		slog.Int("index", sl.currentIndex),
+		slog.String("forward", sl.accounts[sl.currentIndex].forward),
+	)
 }
 
 func (sl *simpleLogin) apiKey() string {
@@ -61,18 +58,35 @@ func (sl *simpleLogin) auth() types.Pair[string] {
 
 func (sl *simpleLogin) NewAddress(ctx context.Context, name string) (string, error) {
 	address := nameToAddress(name)
-	options, err := sl.aliasOptions(ctx)
-	if err != nil {
-		return "", err
-	}
-	result, err := sl.aliasCustomNew(ctx, address, options[rand.IntN(len(options))].signedSuffix)
-	if err != nil {
-		if strings.Contains(err.Error(), "429") && sl.nextAccount() {
-			return sl.NewAddress(ctx, name)
+	return sl.newAddress(func() (string, error) {
+		options, err := sl.aliasOptions(ctx)
+		if err != nil {
+			return "", err
 		}
-		return "", err
+		return sl.aliasCustomNew(ctx, address, options[rand.IntN(len(options))].signedSuffix)
+	})
+}
+
+func (sl *simpleLogin) newAddress(create func() (string, error)) (string, error) {
+	var lastErr error
+	for attempts := 0; attempts < len(sl.accounts); attempts++ {
+		result, err := create()
+		if err == nil {
+			return result, nil
+		}
+		if !strings.Contains(err.Error(), "429") {
+			return "", err
+		}
+		lastErr = err
+		if attempts < len(sl.accounts)-1 {
+			// 429 时最多绕账号列表一圈，避免递归漏试或无限重试。
+			sl.nextAccount()
+		}
 	}
-	return result, nil
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", errors.New("SL: no account attempted")
 }
 
 func (sl *simpleLogin) DelAddress(ctx context.Context, address string) error {
@@ -89,7 +103,7 @@ func (sl *simpleLogin) DelAddress(ctx context.Context, address string) error {
 	if aliasId == 0 {
 		return errors.New("lastest alias not found")
 	}
-	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/aliases/%d", simpleAPIBase, aliasId), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, fmt.Sprintf("%s/aliases/%d", simpleAPIBase, aliasId), nil)
 	if err != nil {
 		return err
 	}
@@ -97,7 +111,7 @@ func (sl *simpleLogin) DelAddress(ctx context.Context, address string) error {
 	return err
 }
 
-func (sl *simpleLogin) ForwardAddress(ctx context.Context) (string, error) {
+func (sl *simpleLogin) ForwardAddress(ctx context.Context, address string) (string, error) {
 	return sl.accounts[sl.currentIndex].forward, nil
 }
 

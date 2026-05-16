@@ -23,8 +23,8 @@ type sunMail struct {
 	current string
 }
 
-func (sm *sunMail) ForwardAddress(ctx context.Context) (string, error) {
-	return sm.current, nil
+func (sm *sunMail) ForwardAddress(ctx context.Context, address string) (string, error) {
+	return address, nil
 }
 
 func (sm *sunMail) fetchDomain(ctx context.Context) error {

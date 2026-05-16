@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/proto"
 )
 
 // NewDefault 默认使用本机 chrome/chromium 在 ~/.config/rod/data 目录启动浏览器
@@ -28,6 +29,17 @@ func NewDefault(headless bool) (*rod.Browser, error) {
 
 func NewTemp(headless bool) (*rod.Browser, error) {
 	return newBro(headless, "")
+}
+
+func MustBackgroundPage(b *rod.Browser) *rod.Page {
+	page, err := b.Page(proto.TargetCreateTarget{
+		URL:        "",
+		Background: true,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return page
 }
 
 func newBro(headless bool, dataDir string) (*rod.Browser, error) {
@@ -58,15 +70,21 @@ func newBro(headless bool, dataDir string) (*rod.Browser, error) {
 
 func WaitURLChange(ctx context.Context, page *rod.Page, action func()) (string, error) {
 	nowURL := page.MustInfo().URL
-	action()
+	_ = rod.Try(action)
+	count := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return nowURL, ctx.Err()
 		default:
 			time.Sleep(time.Second)
+			count++
 			newURL := page.MustInfo().URL
-			if newURL == nowURL {
+			if newURL == "" || newURL == nowURL {
+				if count >= 6 {
+					_ = rod.Try(action)
+					count = 0
+				}
 				continue
 			}
 			return newURL, nil

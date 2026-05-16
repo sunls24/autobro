@@ -9,7 +9,7 @@ import (
 type IMailAddress interface {
 	NewAddress(ctx context.Context, name string) (string, error)
 	DelAddress(ctx context.Context, address string) error
-	ForwardAddress(ctx context.Context) (string, error)
+	ForwardAddress(ctx context.Context, address string) (string, error)
 }
 
 type IMailWait interface {

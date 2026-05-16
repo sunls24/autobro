@@ -9,209 +9,240 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/input"
+	"github.com/go-rod/rod/lib/proto"
 	"github.com/sunls24/gox"
+	"github.com/tidwall/gjson"
 )
 
-type Worker struct {
-	m       mail.IMail
-	browser *rod.Browser
-	cpa     *cpa.Client
+type Flow struct {
+	m   mail.IMail
+	bro *rod.Browser
+	cpa *cpa.Client
+
+	background, delAddress bool
 }
 
-func New(m mail.IMail, browser *rod.Browser, cpa *cpa.Client) *Worker {
-	return &Worker{m: m, browser: browser, cpa: cpa}
-}
+type Options func(*Flow)
 
-func (w *Worker) Start(count int) error {
-	slog.Info("启动 chatgpt 自动化注册", slog.Int("count", count))
-	for i := 0; i < count; i++ {
-		slog.Info("==> 开始注册", slog.String("progress", fmt.Sprintf("%d/%d", i+1, count)))
-		if err := rod.Try(w.registerOne); err != nil {
-			slog.Error("==> 注册失败\n" + err.Error())
-		}
+func WithIMail(m mail.IMail) Options {
+	return func(w *Flow) {
+		w.m = m
 	}
-	return nil
 }
 
-const (
-	baseURL     = "https://chatgpt.com/"
-	passwordURL = "https://auth.openai.com/create-account/password"
-	emailURL    = "https://auth.openai.com/email-verification"
-	aboutURL    = "https://auth.openai.com/about-you"
-
-	password2URL = "https://auth.openai.com/log-in/password"
-	consentURL   = "https://auth.openai.com/sign-in-with-chatgpt/codex/consent"
-	addPhoneURL  = "https://auth.openai.com/add-phone"
-
-	maxOauthCount = 2
-)
-
-func (w *Worker) registerOne() {
-	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*15)
-	defer cancel()
-
-	name := mail.GenerateName()
-	address, err := w.m.NewAddress(ctx, name)
-	if err != nil {
-		panic(err)
+func WithBro(bro *rod.Browser) Options {
+	return func(w *Flow) {
+		w.bro = bro
 	}
-	defer func() {
-		err = w.m.DelAddress(ctx, address)
+}
+
+func WithCPA(cpa *cpa.Client) Options {
+	return func(w *Flow) {
+		w.cpa = cpa
+	}
+}
+
+func WithBackground() Options {
+	return func(w *Flow) {
+		w.background = true
+	}
+}
+
+func WithDelAddress() Options {
+	return func(w *Flow) {
+		w.delAddress = true
+	}
+}
+
+func New(options ...Options) *Flow {
+	opts := &Flow{}
+	for _, option := range options {
+		option(opts)
+	}
+	return opts
+}
+
+type Account struct {
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	AccessToken string `json:"access_token"`
+}
+
+func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
+	var name = "NOT SPECIFIED"
+	if a == nil || a.Email == "" {
+		a = &Account{}
+		name = mail.GenerateName()
+		address, err := f.m.NewAddress(ctx, name)
 		if err != nil {
-			slog.Error("DelAddress failed:", slog.String("address", address), slog.Any("err", err))
+			panic(err)
+		}
+		a.Email = address
+	}
+
+	defer func() {
+		if !f.delAddress {
+			return
+		}
+		if err := f.m.DelAddress(ctx, a.Email); err != nil {
+			slog.Error("DelAddress", "email", a.Email, "err", err)
 		}
 	}()
-	forwardMail, err := w.m.ForwardAddress(ctx)
+
+	forwardMail, err := f.m.ForwardAddress(ctx, a.Email)
 	if err != nil {
 		panic(err)
 	}
-	slog.Info("-> 获取邮箱地址：" + address)
-	incognito := w.browser.MustIncognito()
-	defer incognito.MustClose()
-	slog.Info("-> 进入首页，点击注册")
-	page := incognito.MustPage(baseURL)
+
+	slog.Info("-> 邮箱地址：" + a.Email)
+	var page *rod.Page
+	if f.background {
+		page = browser.MustBackgroundPage(f.bro)
+	} else {
+		page = f.bro.MustPage()
+	}
+	if page == nil {
+		panic("page is nil")
+	}
 	defer page.MustClose()
+
+	slog.Info("-> 清理登录状态")
+	if err = clearSession(page); err != nil {
+		panic(err)
+	}
+
+	slog.Info("-> 进入首页")
+	page.MustNavigate(baseURL)
 	page.MustWaitLoad()
-	page.MustElement(`button[data-testid="signup-button"]`).MustClick()
+
+	switch page.MustInfo().URL {
+	case baseURL:
+		emailFound := false
+		_, _ = page.Timeout(timeout).Race().
+			ElementR("div.text-xl.font-medium", "全新 ChatGPT Images").
+			MustHandle(func(_ *rod.Element) {
+				_ = page.Keyboard.Press(input.Escape)
+			}).
+			Element("#email").
+			MustHandle(func(_ *rod.Element) {
+				emailFound = true
+			}).
+			Do()
+
+		if !emailFound {
+			slog.Info("-> 点击登录")
+			page.MustElement(`button[data-testid="login-button"]`).MustClick()
+		}
+	}
 	slog.Info("-> 输入邮箱，点击继续")
-	page.MustElement(`#email`).MustInput(address)
+	page.MustElement("#email").MustInput(a.Email)
 	nowURL := browser.MustWaitURLChange(ctx, page, func() {
-		page.MustElement(`button[type="submit"]`).MustClick()
+		page.Timeout(timeout).MustElement(`button[type="submit"]`).MustClick()
 	})
 
 	slog.Info("-> " + nowURL)
 	switch nowURL {
 	case passwordURL:
 		slog.Info("-> 输入密码")
-		page.MustElement(`input[type="password"]`).MustInput(gox.RandStr(11) + "@")
+		if a.Password == "" {
+			a.Password = gox.RandStr(11) + "@"
+		}
+		page.MustElement(`input[type="password"]`).MustInput(a.Password)
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
-			page.MustElement(`button[data-dd-action-name="Continue"]`).MustWaitVisible().MustClick()
-
+			page.Timeout(timeout).MustElement(`button[data-dd-action-name="Continue"]`).MustClick()
 		})
 		fallthrough
 	case emailURL:
 		slog.Info("-> 等待验证码")
-		w.waitMailCode(ctx, forwardMail, func(code string) {
+		if err = f.waitMailCode(ctx, forwardMail, func(code string) {
 			page.MustElement(`input[inputmode="numeric"]`).MustInput(code)
 		}, func() {
 			page.MustElement(`button[name="intent"][value="resend"]`).MustClick()
-		})
+		}); err != nil {
+			panic(err)
+		}
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
-			page.MustElement(`button[name="intent"][value="validate"]`).MustClick()
+			page.Timeout(timeout).MustElement(`button[name="intent"][value="validate"]`).MustClick()
 		})
 	default:
 		unexpectedURL(nowURL)
 	}
+
 	slog.Info("-> " + nowURL)
 	switch nowURL {
 	case aboutURL:
-		page.MustReload()
 		page.MustWaitLoad()
 		page.MustElement(`input[name="name"]`).MustInput(name)
-		page.MustElement(`#_r_3_-age`).MustFocus().MustInput(strconv.Itoa(rand.IntN(10) + 18))
+		page.Keyboard.MustType(input.Tab)
+		age := rand.IntN(10) + 18
+		ageInput, err := page.Timeout(timeout).Element(`input[name="age"][type="number"]`)
+		if err == nil {
+			ageInput.MustInput(strconv.Itoa(age))
+		} else {
+			y := time.Now().Year() - age
+			m := rand.IntN(12) + 1
+			d := rand.IntN(28) + 1
+			want := fmt.Sprintf("%04d-%02d-%02d", y, m, d)
+			slog.Info("-> birthday " + want)
+
+			fillDateSegment(page, "year", fmt.Sprintf("%04d", y))
+			fillDateSegment(page, "month", fmt.Sprintf("%02d", m))
+			fillDateSegment(page, "day", fmt.Sprintf("%02d", d))
+
+			page.Timeout(timeout).MustWait(`(want) => document.querySelector('input[name="birthday"]')?.value === want`, want)
+		}
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
-			page.MustElement(`button[type="submit"][data-dd-action-name="Continue"]`).MustClick()
+			page.Timeout(timeout).MustElement(`button[type="submit"][data-dd-action-name="Continue"]`).MustClick()
 		})
 	case baseURL:
 	default:
 		unexpectedURL(nowURL)
 	}
+	switch nowURL {
+	case passkeyURL:
+		nowURL = browser.MustWaitURLChange(ctx, page, func() {
+			page.Timeout(timeout).MustElement(`[data-dd-action-name="skip create account enroll passkey"]`).MustClick()
+		})
+	}
 	if nowURL != baseURL {
 		unexpectedURL(nowURL)
 	}
 
-	slog.Info("-> stage 1 done!!!")
-	oauthCount := 0
-oauth:
-	oauthCount++
-	oauthURL, err := w.cpa.CodexAuthURL(ctx)
-	if err != nil {
-		panic(err)
-	}
-	slog.Info(fmt.Sprintf("-> 打开 OAuthURL(%d): %s", oauthCount, oauthURL))
-	page.MustNavigate(oauthURL)
-	page.MustWaitLoad()
-	slog.Info("-> 输入邮箱，点击继续")
-	page.MustElement(`input[name="email"]`).MustInput(address)
-	nowURL = browser.MustWaitURLChange(ctx, page, func() {
-		page.MustElement(`button[name="intent"][value="email"]`).MustClick()
-	})
-	slog.Info("-> " + nowURL)
-	switch nowURL {
-	case password2URL:
-		nowURL = browser.MustWaitURLChange(ctx, page, func() {
-			slog.Info("-> 使用一次性验证码登录")
-			page.MustElement(`button[name="intent"][value="passwordless_login_send_otp"]`).MustClick()
-		})
-	default:
-		unexpectedURL(nowURL)
-	}
-	slog.Info("-> " + nowURL)
-	switch nowURL {
-	case emailURL:
-		slog.Info("-> 等待验证码")
-		w.waitMailCode(ctx, forwardMail, func(code string) {
-			page.MustElement(`input[inputmode="numeric"]`).MustInput(code)
-		}, func() {
-			page.MustElement(`button[name="intent"][value="resend"]`).MustClick()
-		})
-		nowURL = browser.MustWaitURLChange(ctx, page, func() {
-			page.MustElement(`button[name="intent"][value="validate"]`).MustWaitVisible().MustClick()
-		})
-	default:
-		unexpectedURL(nowURL)
-	}
-	slog.Info("-> " + nowURL)
-	switch nowURL {
-	case consentURL:
-		nowURL = browser.MustWaitURLChange(ctx, page, func() {
-			slog.Info("-> 点击继续")
-			page.MustElement(`button[type="submit"][data-dd-action-name="Continue"]`).MustClick()
-		})
-	case addPhoneURL:
-		if oauthCount < maxOauthCount {
-			goto oauth
-		}
-
-		panic("oauth add phone: " + address)
-	default:
-		unexpectedURL(nowURL)
-	}
-	slog.Info("-> " + nowURL)
-	if strings.Contains(nowURL, "localhost") {
-		err = w.cpa.CodexCallback(ctx, nowURL)
-		if err != nil {
-			panic(err)
-		}
-	} else {
-		unexpectedURL(nowURL)
-	}
-
-	slog.Info("==> 注册成功", slog.String("用时", time.Since(start).String()), slog.String("address", address))
+	slog.Info("-> 获取 access token")
+	a.AccessToken = gjson.Get(page.MustEval(`async () => {
+		const res = await fetch("https://chatgpt.com/api/auth/session/")
+		return await res.text()
+	}`).String(), "accessToken").String()
+	return a
 }
 
-func unexpectedURL(url string) {
-	panic("意外的URL: " + url)
-}
+const (
+	timeout = time.Second * 2
 
-func (w *Worker) waitMailCode(ctx context.Context, forwardMail string, input func(code string), resend func()) {
-	ch := w.m.WaitMailCode(ctx, forwardMail)
+	baseURL     = "https://chatgpt.com/"
+	passwordURL = "https://auth.openai.com/create-account/password"
+	emailURL    = "https://auth.openai.com/email-verification"
+	aboutURL    = "https://auth.openai.com/about-you"
+	passkeyURL  = "https://auth.openai.com/create-account-enroll-passkey"
+)
+
+func (f *Flow) waitMailCode(ctx context.Context, forwardMail string, input func(code string), resend func()) error {
+	ch := f.m.WaitMailCode(ctx, forwardMail)
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case code := <-ch:
 			if code.Err != nil {
-				panic("WaitMailCode: " + code.Err.Error())
+				return fmt.Errorf("waitMailCode: %w", code.Err)
 			}
 			slog.Info("-> " + code.Value)
 			input(code.Value)
-			return
+			return nil
 		case <-ticker.C:
 			if resend != nil {
 				slog.Info("-> 重新发送电子邮件")
@@ -219,4 +250,48 @@ func (w *Worker) waitMailCode(ctx context.Context, forwardMail string, input fun
 			}
 		}
 	}
+}
+
+func fillDateSegment(page *rod.Page, typ, val string) {
+	seg := page.MustElement(fmt.Sprintf(`.react-aria-DateField [data-type="%s"]`, typ))
+	seg.MustClick()
+	seg.MustEval(`function() {
+		this.focus();
+		const range = document.createRange();
+		range.selectNodeContents(this);
+		const selection = window.getSelection();
+		selection.removeAllRanges();
+		selection.addRange(range);
+	}`)
+
+	for _, r := range val {
+		page.Keyboard.MustType(input.Key(r))
+	}
+}
+
+var sessionOrigins = []string{
+	"https://chatgpt.com",
+	"https://auth.openai.com",
+}
+
+func clearSession(page *rod.Page) (err error) {
+	if err = page.Browser().SetCookies(nil); err != nil {
+		return fmt.Errorf("clear cookies: %w", err)
+	}
+
+	for _, origin := range sessionOrigins {
+		err = proto.StorageClearDataForOrigin{
+			Origin:       origin,
+			StorageTypes: string(proto.StorageStorageTypeAll),
+		}.Call(page)
+		if err != nil {
+			return fmt.Errorf("clear storage for %s: %w", origin, err)
+		}
+	}
+
+	return nil
+}
+
+func unexpectedURL(url string) {
+	panic("意外的URL: " + url)
 }

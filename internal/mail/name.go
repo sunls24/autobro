@@ -105,10 +105,12 @@ func nameToAddress(name string) (address string) {
 	if name == "" {
 		address = gox.RandStr(8)
 	} else {
-		address = strings.ReplaceAll(name, " ", connection[rand.IntN(len(connection))])
+		conn := connection[rand.IntN(len(connection))]
+		address = strings.ReplaceAll(name, " ", conn) + conn
 		if r := rand.IntN(200) + 1; r < 100 {
 			address += strconv.Itoa(r)
 		}
+		address += gox.RandStr(2)
 	}
 	return strings.ToLower(address)
 }
