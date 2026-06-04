@@ -9,16 +9,31 @@ import (
 const (
 	AddressProviderSimpleLogin = "sl"
 	AddressProviderSunMail     = "sun"
+	AddressProviderManyMe      = "mm"
 )
 
-func NewAddressProvider(ctx context.Context, provider string, slAPIKeys []string) (IMailAddress, error) {
+type AddressProviderConfig struct {
+	SLAPIKeys            []string
+	ManyMeUsername       string
+	ManyMeForwardAddress string
+}
+
+func NewAddressProvider(ctx context.Context, provider string, cfg AddressProviderConfig) (IMailAddress, error) {
 	switch normalizeAddressProvider(provider) {
 	case AddressProviderSimpleLogin:
-		return NewSimpleLogin(ctx, slAPIKeys)
+		return NewSimpleLogin(ctx, cfg.SLAPIKeys)
 	case AddressProviderSunMail:
 		return NewSunMail(), nil
+	case AddressProviderManyMe:
+		return NewManyMe(cfg.ManyMeUsername, cfg.ManyMeForwardAddress)
 	default:
-		return nil, fmt.Errorf("unsupported mail address provider %q, use %q or %q", provider, AddressProviderSimpleLogin, AddressProviderSunMail)
+		return nil, fmt.Errorf(
+			"unsupported mail address provider %q, use %q, %q or %q",
+			provider,
+			AddressProviderSimpleLogin,
+			AddressProviderSunMail,
+			AddressProviderManyMe,
+		)
 	}
 }
 

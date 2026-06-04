@@ -89,15 +89,7 @@ func (sm *sunMail) waitMailCode(ctx context.Context, address string) (string, er
 					return "", err
 				}
 				htmlContent := gjson.ParseBytes(detail).Get("content").String()
-				codes := codeRE.FindAllString(htmlContent, 5)
-				code = ""
-				for _, v := range codes {
-					if v[:1] == "#" {
-						continue
-					}
-					code = strings.TrimSpace(v)
-					break
-				}
+				code = extractMailCode(htmlContent)
 				if code == "" {
 					continue
 				}
@@ -113,7 +105,16 @@ func (sm *sunMail) WaitMailCode(ctx context.Context, address string) <-chan gox.
 	})
 }
 
-var codeRE = regexp.MustCompile(`.\b\d{6}\b`)
+var codeRE = regexp.MustCompile(`(?:^|[^[:alnum:]#])([0-9]{6})(?:[^[:alnum:]]|$)`)
+
+func extractMailCode(content string) string {
+	for _, match := range codeRE.FindAllStringSubmatch(content, -1) {
+		if len(match) > 1 {
+			return strings.TrimSpace(match[1])
+		}
+	}
+	return ""
+}
 
 func isDigits(s string) bool {
 	for _, ch := range s {

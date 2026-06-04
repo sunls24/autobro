@@ -3,9 +3,11 @@ package toapi
 import "github.com/caarlos0/env/v11"
 
 type Config struct {
-	SLAPIKeys     []string `env:"SL_API_KEY" envSeparator:","`
-	AccountsURL   string   `env:"TOAPI_ACCOUNTS_URL,required,notEmpty"`
-	AccountsToken string   `env:"TOAPI_ACCOUNTS_TOKEN,required,notEmpty"`
+	SLAPIKeys            []string `env:"SL_API_KEY" envSeparator:","`
+	ManyMeUsername       string   `env:"MANYME_USERNAME"`
+	ManyMeForwardAddress string   `env:"MANYME_FORWARD_ADDRESS"`
+	AccountsURL          string   `env:"TOAPI_ACCOUNTS_URL,required,notEmpty"`
+	AccountsToken        string   `env:"TOAPI_ACCOUNTS_TOKEN,required,notEmpty"`
 }
 
 func MustNew() *Config {

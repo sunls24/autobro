@@ -16,7 +16,7 @@ func main() {
 	//slog.SetLogLoggerLevel(slog.LevelDebug)
 	cfg := toapi.MustNew()
 	count := flag.Int("c", 10, "注册数量")
-	mailProvider := flag.String("m", mail.AddressProviderSimpleLogin, "邮箱地址实现: sl 或 sun")
+	mailProvider := flag.String("m", mail.AddressProviderSimpleLogin, "邮箱地址实现: sl, sun 或 mm")
 	flag.Parse()
 	if *count <= 0 {
 		panic("count must be greater than 0")
@@ -25,15 +25,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	address, err := mail.NewAddressProvider(ctx, *mailProvider, mail.AddressProviderConfig{
+		SLAPIKeys:            cfg.SLAPIKeys,
+		ManyMeUsername:       cfg.ManyMeUsername,
+		ManyMeForwardAddress: cfg.ManyMeForwardAddress,
+	})
+	if err != nil {
+		panic(err)
+	}
 	bro, err := browser.NewDefault(false)
 	if err != nil {
 		panic(err)
 	}
 	defer bro.MustClose()
-	address, err := mail.NewAddressProvider(ctx, *mailProvider, cfg.SLAPIKeys)
-	if err != nil {
-		panic(err)
-	}
 	worker := toapi.New(mail.From(address, mail.NewSunMail()), bro, cfg)
 	err = worker.Start(ctx, *count)
 	if err != nil && !errors.Is(err, context.Canceled) {
