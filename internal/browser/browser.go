@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -23,8 +26,46 @@ func NewDefault(headless bool) (*rod.Browser, error) {
 	if err = os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir %q: %w", dataDir, err)
 	}
+	if err = removeStaleSingletonFiles(dataDir); err != nil {
+		return nil, err
+	}
 
 	return newBro(headless, dataDir)
+}
+
+func removeStaleSingletonFiles(dataDir string) error {
+	lockPath := filepath.Join(dataDir, "SingletonLock")
+	lock, err := os.Readlink(lockPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read browser singleton lock: %w", err)
+	}
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		return fmt.Errorf("get hostname: %w", err)
+	}
+	pidText, ok := strings.CutPrefix(lock, hostname+"-")
+	if !ok {
+		return nil
+	}
+	pid, err := strconv.Atoi(pidText)
+	if err != nil {
+		return nil
+	}
+	if err = syscall.Kill(pid, 0); err == nil || !errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+
+	for _, name := range []string{"SingletonLock", "SingletonCookie", "SingletonSocket"} {
+		path := filepath.Join(dataDir, name)
+		if err = os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale browser singleton file %q: %w", path, err)
+		}
+	}
+	return nil
 }
 
 func NewTemp(headless bool) (*rod.Browser, error) {

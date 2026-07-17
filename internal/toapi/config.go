@@ -4,6 +4,7 @@ import "github.com/caarlos0/env/v11"
 
 type Config struct {
 	SLAPIKeys            []string `env:"SL_API_KEY" envSeparator:","`
+	SunMailAPIKey        string   `env:"SUNMAIL_API_KEY,required,notEmpty"`
 	ManyMeUsername       string   `env:"MANYME_USERNAME"`
 	ManyMeForwardAddress string   `env:"MANYME_FORWARD_ADDRESS"`
 	AccountsURL          string   `env:"TOAPI_ACCOUNTS_URL,required,notEmpty"`

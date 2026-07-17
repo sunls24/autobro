@@ -2,6 +2,23 @@ package mail
 
 import "testing"
 
+func TestParseSunMailDomains(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"code":0,"message":"ok","data":["isco.eu.org","sunix.eu.org","chato.eu.org"]}`)
+	domains := parseSunMailDomains(body)
+
+	want := []string{"isco.eu.org", "sunix.eu.org", "chato.eu.org"}
+	if len(domains) != len(want) {
+		t.Fatalf("parseSunMailDomains() = %q, want %q", domains, want)
+	}
+	for i := range want {
+		if domains[i] != want[i] {
+			t.Fatalf("parseSunMailDomains()[%d] = %q, want %q", i, domains[i], want[i])
+		}
+	}
+}
+
 func TestExtractMailCodeSkipsManyMeColorValues(t *testing.T) {
 	t.Parallel()
 

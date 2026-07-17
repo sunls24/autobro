@@ -12,6 +12,7 @@ import (
 
 	"github.com/sunls24/gox"
 	"github.com/sunls24/gox/network/client"
+	"github.com/sunls24/gox/types"
 	"github.com/tidwall/gjson"
 )
 
@@ -21,6 +22,7 @@ var _ IMailAddress = (*sunMail)(nil)
 type sunMail struct {
 	domains []string
 	current string
+	apiKey  string
 }
 
 func (sm *sunMail) ForwardAddress(ctx context.Context, address string) (string, error) {
@@ -32,17 +34,21 @@ func (sm *sunMail) fetchDomain(ctx context.Context) error {
 		return nil
 	}
 	const PATH = "/domain"
-	body, err := client.Get(ctx, sunMailBaseURL+PATH)
+	body, err := client.Get(ctx, sunMailBaseURL+PATH, sm.apiKeyHeader())
 	if err != nil {
 		return err
 	}
-	sm.domains = gox.Map(gjson.ParseBytes(body).Array(), func(r gjson.Result) string {
-		return r.String()
-	})
+	sm.domains = parseSunMailDomains(body)
 	if len(sm.domains) == 0 {
 		return errors.New("no domain found")
 	}
 	return nil
+}
+
+func parseSunMailDomains(body []byte) []string {
+	return gox.Map(gjson.GetBytes(body, "data").Array(), func(r gjson.Result) string {
+		return r.String()
+	})
 }
 
 func (sm *sunMail) DelAddress(ctx context.Context, address string) error {
@@ -70,11 +76,11 @@ func (sm *sunMail) waitMailCode(ctx context.Context, address string) (string, er
 			return "", ctx.Err()
 		default:
 			time.Sleep(time.Second)
-			body, err := client.Get(ctx, fmt.Sprintf("%s/fetch?to=%s&since=%d", sunMailBaseURL, address, start))
+			body, err := client.Get(ctx, fmt.Sprintf("%s/fetch?to=%s&since=%d", sunMailBaseURL, address, start), sm.apiKeyHeader())
 			if err != nil {
 				return "", err
 			}
-			list := gjson.ParseBytes(body).Array()
+			list := gjson.ParseBytes(body).Get("data").Array()
 			for _, item := range list {
 				subject := item.Get("subject").String()
 				if len(subject) < 6 {
@@ -84,11 +90,11 @@ func (sm *sunMail) waitMailCode(ctx context.Context, address string) (string, er
 				if isDigits(code) {
 					return code, nil
 				}
-				detail, err := client.Get(ctx, fmt.Sprintf("%s/fetch/%s", sunMailBaseURL, item.Get("id").String()))
+				detail, err := client.Get(ctx, fmt.Sprintf("%s/fetch/%s?to=%s", sunMailBaseURL, item.Get("id").String(), address), sm.apiKeyHeader())
 				if err != nil {
 					return "", err
 				}
-				htmlContent := gjson.ParseBytes(detail).Get("content").String()
+				htmlContent := gjson.ParseBytes(detail).Get("data.content").String()
 				code = extractMailCode(htmlContent)
 				if code == "" {
 					continue
@@ -125,6 +131,10 @@ func isDigits(s string) bool {
 	return true
 }
 
-func NewSunMail() IMail {
-	return &sunMail{}
+func (sm *sunMail) apiKeyHeader() types.Pair[string] {
+	return types.NewPair("X-API-Key", sm.apiKey)
+}
+
+func NewSunMail(apiKey string) IMail {
+	return &sunMail{apiKey: apiKey}
 }

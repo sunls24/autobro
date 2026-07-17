@@ -2,8 +2,8 @@ github.com/caarlos0/env/v11 v11.4.0 h1:Kcb6t5kIIr4XkoQC9AF2j+8E1Jsrl3Wz/hhm1LtoG
 github.com/caarlos0/env/v11 v11.4.0/go.mod h1:qupehSf/Y0TUTsxKywqRt/vJjN5nz6vauiYEUUr8P4U=
 github.com/go-rod/rod v0.116.2 h1:A5t2Ky2A+5eD/ZJQr1EfsQSe5rms5Xof/qj296e+ZqA=
 github.com/go-rod/rod v0.116.2/go.mod h1:H+CMO9SCNc2TJ2WfrG+pKhITz57uGNYU43qYHh438Mg=
-github.com/sunls24/gox v0.0.0-20260415123526-33f5cfedda37 h1:Zne1A+v0kbljDgJeVqqOGBqrK4ySRPQ/h9Wsrs/DbCk=
-github.com/sunls24/gox v0.0.0-20260415123526-33f5cfedda37/go.mod h1:+7ltM6XwBjL3zGU/OFcmDM6C+vhaLl7+Sos2p2P7xss=
+github.com/sunls24/gox v0.0.0-20260516115006-1c74a7f79674 h1:CV+XZh+9h6bK9CB/UJ5BeGvC9EfPfbukxeWkL4ND+bQ=
+github.com/sunls24/gox v0.0.0-20260516115006-1c74a7f79674/go.mod h1:SXIwHaN3NAJSNGdmxlU/tHY++MfAXkqZSZzPzciUC8M=
 github.com/tidwall/gjson v1.18.0 h1:FIDeeyB800efLX89e5a8Y0BNH+LOngJyGrIWxG2FKQY=
 github.com/tidwall/gjson v1.18.0/go.mod h1:/wbyibRr2FHMks5tjHJ5F8dMZh3AcwJEMf5vlfC0lxk=
 github.com/tidwall/match v1.1.1/go.mod h1:eRSPERbgtNPcGhD8UCthc6PmLEQXEWd3PRB5JTxsfmM=

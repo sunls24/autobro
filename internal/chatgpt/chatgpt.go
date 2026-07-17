@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -70,6 +71,22 @@ type Account struct {
 	Email       string `json:"email"`
 	Password    string `json:"password"`
 	AccessToken string `json:"access_token"`
+}
+
+func clickLogin(page *rod.Page) {
+	selector := `
+		button[data-testid="login-button"],
+		button[data-mobile-auth-entry-action="login"]
+	`
+	for _, button := range page.MustElements(selector) {
+		if button.MustVisible() && !button.MustDisabled() {
+			button.
+				MustScrollIntoView().
+				MustClick()
+			return
+		}
+	}
+	panic("没有找到可见的登录按钮")
 }
 
 func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
@@ -135,15 +152,24 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 
 		if !emailFound {
 			slog.Info("-> 点击登录")
-			page.MustElement(`button[data-testid="login-button"]`).MustClick()
+			clickLogin(page)
 		}
 	}
 	slog.Info("-> 输入邮箱，点击继续")
-	page.MustElement("#email").MustInput(a.Email)
+	page.Timeout(timeout * 2).
+		MustElement("#email, #mobile-auth-email").
+		MustWaitVisible().
+		MustInput(a.Email)
+	email := page.Timeout(timeout * 2).
+		MustElement("#email, #mobile-auth-email").
+		MustWaitVisible().
+		MustSelectAllText().
+		MustInput(strings.TrimSpace(a.Email))
 	nowURL := browser.MustWaitURLChange(ctx, page, func() {
-		page.Timeout(timeout).MustElement(`button[type="submit"]`).MustClick()
+		email.MustType(input.Enter)
 	})
 
+inputEmail:
 	slog.Info("-> " + nowURL)
 	switch nowURL {
 	case passwordURL:
@@ -169,6 +195,12 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 			page.Timeout(timeout).MustElement(`button[name="intent"][value="validate"]`).MustClick()
 		})
 	default:
+		if strings.Contains(nowURL, "/auth/login_with") {
+			time.Sleep(time.Second * 1)
+			nowURL = page.MustInfo().URL
+			goto inputEmail
+		}
+
 		unexpectedURL(nowURL)
 	}
 

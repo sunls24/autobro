@@ -5,7 +5,7 @@ go 1.25.5
 require (
 	github.com/caarlos0/env/v11 v11.4.0
 	github.com/go-rod/rod v0.116.2
-	github.com/sunls24/gox v0.0.0-20260415123526-33f5cfedda37
+	github.com/sunls24/gox v0.0.0-20260516115006-1c74a7f79674
 	github.com/tidwall/gjson v1.18.0
 )
 

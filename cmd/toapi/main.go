@@ -27,6 +27,7 @@ func main() {
 
 	address, err := mail.NewAddressProvider(ctx, *mailProvider, mail.AddressProviderConfig{
 		SLAPIKeys:            cfg.SLAPIKeys,
+		SunMailAPIKey:        cfg.SunMailAPIKey,
 		ManyMeUsername:       cfg.ManyMeUsername,
 		ManyMeForwardAddress: cfg.ManyMeForwardAddress,
 	})
@@ -38,7 +39,7 @@ func main() {
 		panic(err)
 	}
 	defer bro.MustClose()
-	worker := toapi.New(mail.From(address, mail.NewSunMail()), bro, cfg)
+	worker := toapi.New(mail.From(address, mail.NewSunMail(cfg.SunMailAPIKey)), bro, cfg)
 	err = worker.Start(ctx, *count)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		panic(err)
