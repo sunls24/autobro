@@ -181,6 +181,9 @@ inputEmail:
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
 			page.Timeout(timeout).MustElement(`button[data-dd-action-name="Continue"]`).MustClick()
 		})
+		if nowURL != emailURL {
+			break
+		}
 		fallthrough
 	case emailURL:
 		slog.Info("-> 等待验证码")
