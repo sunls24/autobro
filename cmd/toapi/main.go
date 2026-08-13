@@ -9,6 +9,7 @@ import (
 	"flag"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 )
 
@@ -17,10 +18,12 @@ func main() {
 	cfg := toapi.MustNew()
 	count := flag.Int("c", 10, "注册数量")
 	mailProvider := flag.String("m", mail.AddressProviderSimpleLogin, "邮箱地址实现: sl, sun 或 mm")
+	sunMailDomains := flag.String("d", "", "SunMail 域名后缀，多个用逗号分隔")
 	flag.Parse()
 	if *count <= 0 {
 		panic("count must be greater than 0")
 	}
+	domains := strings.Split(*sunMailDomains, ",")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -28,6 +31,7 @@ func main() {
 	address, err := mail.NewAddressProvider(ctx, *mailProvider, mail.AddressProviderConfig{
 		SLAPIKeys:            cfg.SLAPIKeys,
 		SunMailAPIKey:        cfg.SunMailAPIKey,
+		SunMailDomains:       domains,
 		ManyMeUsername:       cfg.ManyMeUsername,
 		ManyMeForwardAddress: cfg.ManyMeForwardAddress,
 	})

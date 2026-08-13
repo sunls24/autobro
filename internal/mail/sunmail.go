@@ -135,6 +135,20 @@ func (sm *sunMail) apiKeyHeader() types.Pair[string] {
 	return types.NewPair("X-API-Key", sm.apiKey)
 }
 
-func NewSunMail(apiKey string) IMail {
-	return &sunMail{apiKey: apiKey}
+func NewSunMail(apiKey string, domains ...string) IMail {
+	return &sunMail{
+		apiKey:  apiKey,
+		domains: normalizeSunMailDomains(domains),
+	}
+}
+
+func normalizeSunMailDomains(domains []string) []string {
+	result := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		domain = strings.TrimPrefix(strings.TrimSpace(domain), "@")
+		if domain != "" {
+			result = append(result, domain)
+		}
+	}
+	return result
 }

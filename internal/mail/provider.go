@@ -15,6 +15,7 @@ const (
 type AddressProviderConfig struct {
 	SLAPIKeys            []string
 	SunMailAPIKey        string
+	SunMailDomains       []string
 	ManyMeUsername       string
 	ManyMeForwardAddress string
 }
@@ -24,7 +25,7 @@ func NewAddressProvider(ctx context.Context, provider string, cfg AddressProvide
 	case AddressProviderSimpleLogin:
 		return NewSimpleLogin(ctx, cfg.SLAPIKeys)
 	case AddressProviderSunMail:
-		return NewSunMail(cfg.SunMailAPIKey), nil
+		return NewSunMail(cfg.SunMailAPIKey, cfg.SunMailDomains...), nil
 	case AddressProviderManyMe:
 		return NewManyMe(cfg.ManyMeUsername, cfg.ManyMeForwardAddress)
 	default:
