@@ -122,3 +122,36 @@ func TestAccountStoreKeepsValidTailWithoutNewline(t *testing.T) {
 		t.Fatalf("loadAccounts() returned %d accounts, want 2", len(accounts))
 	}
 }
+
+func TestRemoveAccount(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "accounts.jsonl")
+	for _, account := range []*chatgpt.Account{
+		{Email: "removed@example.com", AccessToken: "old-token"},
+		{Email: "kept@example.com", AccessToken: "kept-token"},
+		{Email: "removed@example.com", AccessToken: "new-token"},
+	} {
+		if err := appendAccount(path, account); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := removeAccount(path, "removed@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := loadAccounts(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || accounts[0].Email != "kept@example.com" {
+		t.Fatalf("loadAccounts() = %#v, want only kept account", accounts)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("accounts file permissions = %o, want 600", info.Mode().Perm())
+	}
+}

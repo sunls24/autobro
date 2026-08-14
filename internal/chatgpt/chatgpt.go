@@ -5,6 +5,7 @@ import (
 	"codex-free/internal/cpa"
 	"codex-free/internal/mail"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -196,7 +197,7 @@ inputEmail:
 		}
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
 			page.Timeout(timeout).MustElement(`button[name="intent"][value="validate"]`).MustClick()
-		})
+		}, checkAccountDeactivated)
 	default:
 		if strings.Contains(nowURL, "/auth/login_with") {
 			time.Sleep(time.Second * 1)
@@ -253,6 +254,20 @@ inputEmail:
 		return await res.text()
 	}`).String(), "accessToken").String()
 	return a
+}
+
+var ErrAccountDeactivated = errors.New("account deactivated")
+
+func checkAccountDeactivated(page *rod.Page) error {
+	body, err := page.Element("body")
+	if err != nil {
+		return nil
+	}
+	text, err := body.Text()
+	if err == nil && strings.Contains(text, "account_deactivated") {
+		return ErrAccountDeactivated
+	}
+	return nil
 }
 
 const (

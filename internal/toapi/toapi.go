@@ -105,6 +105,13 @@ func (w *Worker) Renew(ctx context.Context) error {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
+			if errors.Is(err, chatgpt.ErrAccountDeactivated) {
+				if err = removeAccount(accountsFile, account.Email); err != nil {
+					return err
+				}
+				slog.Warn("账号已被删除或停用，已移除本地记录", slog.String("email", account.Email))
+				continue
+			}
 			slog.Error("重新登录失败", slog.String("email", account.Email), slog.Any("err", err))
 			continue
 		}

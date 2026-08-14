@@ -109,7 +109,7 @@ func newBro(headless bool, dataDir string) (*rod.Browser, error) {
 	return browser, nil
 }
 
-func WaitURLChange(ctx context.Context, page *rod.Page, action func()) (string, error) {
+func WaitURLChange(ctx context.Context, page *rod.Page, action func(), checks ...func(*rod.Page) error) (string, error) {
 	nowURL := page.MustInfo().URL
 	_ = rod.Try(action)
 	count := 0
@@ -121,20 +121,24 @@ func WaitURLChange(ctx context.Context, page *rod.Page, action func()) (string, 
 			time.Sleep(time.Second)
 			count++
 			newURL := page.MustInfo().URL
-			if newURL == "" || newURL == nowURL {
-				if count >= 6 {
-					_ = rod.Try(action)
-					count = 0
-				}
-				continue
+			if newURL != "" && newURL != nowURL {
+				return newURL, nil
 			}
-			return newURL, nil
+			for _, check := range checks {
+				if err := check(page); err != nil {
+					return nowURL, err
+				}
+			}
+			if count >= 6 {
+				_ = rod.Try(action)
+				count = 0
+			}
 		}
 	}
 }
 
-func MustWaitURLChange(ctx context.Context, page *rod.Page, action func()) string {
-	newURL, err := WaitURLChange(ctx, page, action)
+func MustWaitURLChange(ctx context.Context, page *rod.Page, action func(), checks ...func(*rod.Page) error) string {
+	newURL, err := WaitURLChange(ctx, page, action, checks...)
 	if err != nil {
 		panic(err)
 	}

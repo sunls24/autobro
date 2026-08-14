@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"codex-free/internal/chatgpt"
@@ -34,6 +35,44 @@ func appendAccount(path string, account *chatgpt.Account) error {
 	}
 	if err = json.NewEncoder(f).Encode(account); err != nil {
 		return fmt.Errorf("write account: %w", err)
+	}
+	return nil
+}
+
+func removeAccount(path, email string) error {
+	accounts, err := loadAccounts(path)
+	if err != nil {
+		return err
+	}
+	remaining := accounts[:0]
+	for i := range accounts {
+		if !strings.EqualFold(strings.TrimSpace(accounts[i].Email), strings.TrimSpace(email)) {
+			remaining = append(remaining, accounts[i])
+		}
+	}
+
+	f, err := os.CreateTemp(filepath.Dir(path), ".accounts-*.jsonl")
+	if err != nil {
+		return fmt.Errorf("create temporary accounts file: %w", err)
+	}
+	tmpPath := f.Name()
+	defer os.Remove(tmpPath)
+	if err = f.Chmod(0o600); err == nil {
+		encoder := json.NewEncoder(f)
+		for i := range remaining {
+			if err = encoder.Encode(&remaining[i]); err != nil {
+				break
+			}
+		}
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return fmt.Errorf("write accounts file: %w", err)
+	}
+	if err = os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replace accounts file: %w", err)
 	}
 	return nil
 }
