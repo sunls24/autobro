@@ -7,8 +7,8 @@ type Config struct {
 	SunMailAPIKey        string   `env:"SUNMAIL_API_KEY,required,notEmpty"`
 	ManyMeUsername       string   `env:"MANYME_USERNAME"`
 	ManyMeForwardAddress string   `env:"MANYME_FORWARD_ADDRESS"`
-	AccountsURL          string   `env:"TOAPI_ACCOUNTS_URL,required,notEmpty"`
-	AccountsToken        string   `env:"TOAPI_ACCOUNTS_TOKEN,required,notEmpty"`
+	SceneMintURL         string   `env:"SCENEMINT_URL,required,notEmpty"`
+	SceneMintAPIKey      string   `env:"SCENEMINT_API_KEY,required,notEmpty"`
 }
 
 func MustNew() *Config {
