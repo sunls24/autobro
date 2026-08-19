@@ -3,10 +3,8 @@ package mail
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"math/rand/v2"
-	"net/http"
 	"strings"
 
 	"github.com/sunls24/gox"
@@ -20,9 +18,6 @@ type account struct {
 	mailboxId int64
 	apiKey    string
 	forward   string
-
-	lastestAlias   string
-	lastestAliasId int64
 }
 
 type simpleLogin struct {
@@ -45,11 +40,6 @@ func (sl *simpleLogin) apiKey() string {
 
 func (sl *simpleLogin) mailboxId() int64 {
 	return sl.accounts[sl.currentIndex].mailboxId
-}
-
-func (sl *simpleLogin) setLastest(alias string, aliasId int64) {
-	sl.accounts[sl.currentIndex].lastestAlias = alias
-	sl.accounts[sl.currentIndex].lastestAliasId = aliasId
 }
 
 func (sl *simpleLogin) auth() types.Pair[string] {
@@ -90,25 +80,7 @@ func (sl *simpleLogin) newAddress(create func() (string, error)) (string, error)
 }
 
 func (sl *simpleLogin) DelAddress(ctx context.Context, address string) error {
-	var aliasId int64
-	if ca := sl.accounts[sl.currentIndex]; address == ca.lastestAlias {
-		aliasId = ca.lastestAliasId
-	} else {
-		for _, a := range sl.accounts {
-			if a.lastestAlias == address {
-				aliasId = a.lastestAliasId
-			}
-		}
-	}
-	if aliasId == 0 {
-		return errors.New("lastest alias not found")
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, fmt.Sprintf("%s/aliases/%d", simpleAPIBase, aliasId), nil)
-	if err != nil {
-		return err
-	}
-	_, err = client.Do(req, sl.auth())
-	return err
+	return nil
 }
 
 func (sl *simpleLogin) ForwardAddress(ctx context.Context, address string) (string, error) {
@@ -153,8 +125,6 @@ func (sl *simpleLogin) aliasCustomNew(ctx context.Context, custom string, signed
 		return "", err
 	}
 	slog.Debug("SL: aliasCustomNew\n" + string(body))
-	alias := gjson.GetBytes(body, "alias").String()
-	sl.setLastest(alias, gjson.GetBytes(body, "id").Int())
 	return gjson.GetBytes(body, "email").String(), nil
 }
 

@@ -16,8 +16,8 @@ import (
 const accountsFile = "accounts.jsonl"
 
 func appendAccount(path string, account *chatgpt.Account) error {
-	if account == nil || strings.TrimSpace(account.Email) == "" || strings.TrimSpace(account.AccessToken) == "" {
-		return errors.New("email and access token are required")
+	if account == nil || strings.TrimSpace(account.Email) == "" {
+		return errors.New("email is required")
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -50,7 +50,6 @@ func removeAccount(path, email string) error {
 			remaining = append(remaining, accounts[i])
 		}
 	}
-
 	f, err := os.CreateTemp(filepath.Dir(path), ".accounts-*.jsonl")
 	if err != nil {
 		return fmt.Errorf("create temporary accounts file: %w", err)

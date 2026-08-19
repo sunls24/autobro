@@ -25,7 +25,7 @@ type Flow struct {
 	bro *rod.Browser
 	cpa *cpa.Client
 
-	background, delAddress bool
+	background bool
 }
 
 type Options func(*Flow)
@@ -54,12 +54,6 @@ func WithBackground() Options {
 	}
 }
 
-func WithDelAddress() Options {
-	return func(w *Flow) {
-		w.delAddress = true
-	}
-}
-
 func New(options ...Options) *Flow {
 	opts := &Flow{}
 	for _, option := range options {
@@ -70,8 +64,9 @@ func New(options ...Options) *Flow {
 
 type Account struct {
 	Email       string `json:"email"`
-	Password    string `json:"password"`
-	AccessToken string `json:"access_token"`
+	Password    string `json:"password,omitempty"`
+	ForwardMail string `json:"forward_mail"`
+	AccessToken string `json:"-"`
 }
 
 func clickLogin(page *rod.Page) {
@@ -102,19 +97,16 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 		a.Email = address
 	}
 
-	defer func() {
-		if !f.delAddress {
-			return
+	var err error
+	if strings.TrimSpace(a.ForwardMail) == "" {
+		var forwardMail string
+		forwardMail, err = f.m.ForwardAddress(ctx, a.Email)
+		if err != nil {
+			panic(err)
 		}
-		if err := f.m.DelAddress(ctx, a.Email); err != nil {
-			slog.Error("DelAddress", "email", a.Email, "err", err)
-		}
-	}()
-
-	forwardMail, err := f.m.ForwardAddress(ctx, a.Email)
-	if err != nil {
-		panic(err)
+		a.ForwardMail = forwardMail
 	}
+	forwardMail := a.ForwardMail
 
 	slog.Info("-> 邮箱地址：" + a.Email)
 	var page *rod.Page
@@ -253,6 +245,9 @@ inputEmail:
 		const res = await fetch("https://chatgpt.com/api/auth/session/")
 		return await res.text()
 	}`).String(), "accessToken").String()
+	if strings.TrimSpace(a.AccessToken) == "" {
+		panic("access token is empty")
+	}
 	return a
 }
 
