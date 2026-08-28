@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
 	"regexp"
@@ -63,9 +64,7 @@ func (sm *sunMail) NewAddress(ctx context.Context, name string) (string, error) 
 	return sm.current, nil
 }
 
-const (
-	sunMailBaseURL = "https://mail.sunls.de/api"
-)
+const sunMailBaseURL = "https://mail.sunls.de/api"
 
 func (sm *sunMail) waitMailCode(ctx context.Context, address string) (string, error) {
 	slog.Info("stat wait mail code", slog.String("address", address))
@@ -78,6 +77,10 @@ func (sm *sunMail) waitMailCode(ctx context.Context, address string) (string, er
 			time.Sleep(time.Second)
 			body, err := client.Get(ctx, fmt.Sprintf("%s/fetch?to=%s&since=%d", sunMailBaseURL, address, start), sm.apiKeyHeader())
 			if err != nil {
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					slog.Warn("fetch mail failed, retrying", slog.Any("err", err))
+					continue
+				}
 				return "", err
 			}
 			list := gjson.ParseBytes(body).Get("data").Array()
