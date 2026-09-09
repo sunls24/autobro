@@ -3,8 +3,10 @@ package mail
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"strings"
 
 	"github.com/sunls24/gox"
@@ -23,6 +25,12 @@ type account struct {
 type simpleLogin struct {
 	accounts     []account
 	currentIndex int
+	aliases      map[string]aliasRecord
+}
+
+type aliasRecord struct {
+	id           int64
+	accountIndex int
 }
 
 func (sl *simpleLogin) nextAccount() {
@@ -80,16 +88,41 @@ func (sl *simpleLogin) newAddress(create func() (string, error)) (string, error)
 }
 
 func (sl *simpleLogin) DelAddress(ctx context.Context, address string) error {
-	return nil
+	record, ok := sl.aliases[address]
+	if !ok {
+		return fmt.Errorf("SL: alias not found: %s", address)
+	}
+	defer func() {
+		delete(sl.aliases, address)
+		sl.currentIndex = (record.accountIndex + 1) % len(sl.accounts)
+		slog.Info(
+			"SL: use next account",
+			slog.Int("index", sl.currentIndex),
+			slog.String("forward", sl.accounts[sl.currentIndex].forward),
+		)
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, fmt.Sprintf("%s/aliases/%d", simpleAPIBase, record.id), nil)
+	if err != nil {
+		return err
+	}
+	_, err = client.Do(req, types.NewPair("Authentication", sl.accounts[record.accountIndex].apiKey))
+	return err
+}
+
+func (sl *simpleLogin) ForgetAddress(address string) {
+	delete(sl.aliases, address)
 }
 
 func (sl *simpleLogin) ForwardAddress(ctx context.Context, address string) (string, error) {
-	return sl.accounts[sl.currentIndex].forward, nil
+	record, ok := sl.aliases[address]
+	if !ok {
+		return "", fmt.Errorf("SL: alias not found: %s", address)
+	}
+	return sl.accounts[record.accountIndex].forward, nil
 }
 
-const (
-	simpleAPIBase = "https://app.simplelogin.io/api"
-)
+var simpleAPIBase = "https://app.simplelogin.io/api"
 
 type suffix struct {
 	isPremium    bool
@@ -125,7 +158,16 @@ func (sl *simpleLogin) aliasCustomNew(ctx context.Context, custom string, signed
 		return "", err
 	}
 	slog.Debug("SL: aliasCustomNew\n" + string(body))
-	return gjson.GetBytes(body, "email").String(), nil
+	email := gjson.GetBytes(body, "email").String()
+	aliasID := gjson.GetBytes(body, "id").Int()
+	if email == "" || aliasID == 0 {
+		return "", errors.New("SL: invalid alias response")
+	}
+	sl.aliases[email] = aliasRecord{
+		id:           aliasID,
+		accountIndex: sl.currentIndex,
+	}
+	return email, nil
 }
 
 func NewSimpleLogin(ctx context.Context, apiKeys []string) (IMailAddress, error) {
@@ -158,5 +200,8 @@ func NewSimpleLogin(ctx context.Context, apiKeys []string) (IMailAddress, error)
 	if len(accounts) == 0 {
 		return nil, errors.New("SL: no valid account found")
 	}
-	return &simpleLogin{accounts: accounts}, nil
+	return &simpleLogin{
+		accounts: accounts,
+		aliases:  make(map[string]aliasRecord),
+	}, nil
 }

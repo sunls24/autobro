@@ -9,6 +9,7 @@ import (
 type IMailAddress interface {
 	NewAddress(ctx context.Context, name string) (string, error)
 	DelAddress(ctx context.Context, address string) error
+	ForgetAddress(address string)
 	ForwardAddress(ctx context.Context, address string) (string, error)
 }
 

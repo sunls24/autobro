@@ -55,6 +55,8 @@ func (sm *sunMail) DelAddress(ctx context.Context, address string) error {
 	return nil
 }
 
+func (sm *sunMail) ForgetAddress(address string) {}
+
 func (sm *sunMail) NewAddress(ctx context.Context, name string) (string, error) {
 	if err := sm.fetchDomain(ctx); err != nil {
 		return "", err

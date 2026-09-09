@@ -24,6 +24,8 @@ func (m *many) DelAddress(ctx context.Context, address string) error {
 	return nil
 }
 
+func (m *many) ForgetAddress(address string) {}
+
 func (m *many) ForwardAddress(ctx context.Context, address string) (string, error) {
 	if m.forwardAddress == "" {
 		return "", errors.New("manyme forward address is required")

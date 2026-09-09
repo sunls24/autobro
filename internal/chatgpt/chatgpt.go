@@ -25,7 +25,8 @@ type Flow struct {
 	bro *rod.Browser
 	cpa *cpa.Client
 
-	background bool
+	background      bool
+	mailCodeTimeout time.Duration
 }
 
 type Options func(*Flow)
@@ -54,8 +55,14 @@ func WithBackground() Options {
 	}
 }
 
+func WithMailCodeTimeout(timeout time.Duration) Options {
+	return func(w *Flow) {
+		w.mailCodeTimeout = timeout
+	}
+}
+
 func New(options ...Options) *Flow {
-	opts := &Flow{}
+	opts := &Flow{mailCodeTimeout: defaultMailCodeTimeout}
 	for _, option := range options {
 		option(opts)
 	}
@@ -87,6 +94,7 @@ func clickLogin(page *rod.Page) {
 
 func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 	var name = "NOT SPECIFIED"
+	createdAddress := false
 	if a == nil || a.Email == "" {
 		a = &Account{}
 		name = mail.GenerateName()
@@ -95,6 +103,7 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 			panic(err)
 		}
 		a.Email = address
+		createdAddress = true
 	}
 
 	var err error
@@ -185,6 +194,13 @@ inputEmail:
 		}, func() {
 			page.MustElement(`button[name="intent"][value="resend"]`).MustClick()
 		}); err != nil {
+			if createdAddress && (errors.Is(err, ErrMailCodeTimeout) || errors.Is(err, context.DeadlineExceeded)) {
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				if cleanupErr := f.m.DelAddress(cleanupCtx, a.Email); cleanupErr != nil {
+					slog.Error("删除超时邮箱失败", slog.String("email", a.Email), slog.Any("err", cleanupErr))
+				}
+				cancel()
+			}
 			panic(err)
 		}
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
@@ -248,10 +264,14 @@ inputEmail:
 	if strings.TrimSpace(a.AccessToken) == "" {
 		panic("access token is empty")
 	}
+	if createdAddress {
+		f.m.ForgetAddress(a.Email)
+	}
 	return a
 }
 
 var ErrAccountDeactivated = errors.New("account deactivated")
+var ErrMailCodeTimeout = errors.New("mail code timeout")
 
 func checkAccountDeactivated(page *rod.Page) error {
 	body, err := page.Element("body")
@@ -266,7 +286,8 @@ func checkAccountDeactivated(page *rod.Page) error {
 }
 
 const (
-	timeout = time.Second * 2
+	timeout                = time.Second * 2
+	defaultMailCodeTimeout = 4 * time.Minute
 
 	baseURL     = "https://chatgpt.com/"
 	passwordURL = "https://auth.openai.com/create-account/password"
@@ -279,9 +300,14 @@ func (f *Flow) waitMailCode(ctx context.Context, forwardMail string, input func(
 	ch := f.m.WaitMailCode(ctx, forwardMail)
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
+	timer := time.NewTimer(f.mailCodeTimeout)
+	defer timer.Stop()
 	for {
 		select {
-		case code := <-ch:
+		case code, ok := <-ch:
+			if !ok {
+				return errors.New("waitMailCode: channel closed")
+			}
 			if code.Err != nil {
 				return fmt.Errorf("waitMailCode: %w", code.Err)
 			}
@@ -293,6 +319,10 @@ func (f *Flow) waitMailCode(ctx context.Context, forwardMail string, input func(
 				slog.Info("-> 重新发送电子邮件")
 				resend()
 			}
+		case <-timer.C:
+			return ErrMailCodeTimeout
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 }
