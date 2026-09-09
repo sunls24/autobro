@@ -8,13 +8,20 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func main() {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = transport.Clone()
+		transport.TLSHandshakeTimeout = time.Minute
+		http.DefaultTransport = transport
+	}
 	//slog.SetLogLoggerLevel(slog.LevelDebug)
 	cfg := toapi.MustNew()
 	count := flag.Int("c", 10, "注册数量")

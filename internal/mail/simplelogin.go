@@ -72,12 +72,12 @@ func (sl *simpleLogin) newAddress(create func() (string, error)) (string, error)
 		if err == nil {
 			return result, nil
 		}
-		if !strings.Contains(err.Error(), "429") {
+		if !shouldRotateSimpleLoginAccount(err) {
 			return "", err
 		}
 		lastErr = err
 		if attempts < len(sl.accounts)-1 {
-			// 429 时最多绕账号列表一圈，避免递归漏试或无限重试。
+			// 账号受限时最多绕账号列表一圈，避免递归漏试或无限重试。
 			sl.nextAccount()
 		}
 	}
@@ -85,6 +85,15 @@ func (sl *simpleLogin) newAddress(create func() (string, error)) (string, error)
 		return "", lastErr
 	}
 	return "", errors.New("SL: no account attempted")
+}
+
+func shouldRotateSimpleLoginAccount(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "429") ||
+		strings.Contains(message, "maximum of 10 aliases")
 }
 
 func (sl *simpleLogin) DelAddress(ctx context.Context, address string) error {
