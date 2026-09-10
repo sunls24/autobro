@@ -16,16 +16,18 @@ import (
 )
 
 type Worker struct {
-	flow          *chatgpt.Flow
-	sceneMint     *scenemint.Client
-	storeAccounts bool
+	flow               *chatgpt.Flow
+	sceneMint          *scenemint.Client
+	storeAccounts      bool
+	simpleLoginCleaner mail.IMailAddress
 }
 
-func New(m mail.IMail, bro *rod.Browser, sceneMint *scenemint.Client, storeAccounts bool) *Worker {
+func New(m mail.IMail, bro *rod.Browser, sceneMint *scenemint.Client, storeAccounts bool, simpleLoginCleaner mail.IMailAddress) *Worker {
 	return &Worker{
-		flow:          chatgpt.New(chatgpt.WithIMail(m), chatgpt.WithBackground(), chatgpt.WithBro(bro)),
-		sceneMint:     sceneMint,
-		storeAccounts: storeAccounts,
+		flow:               chatgpt.New(chatgpt.WithIMail(m), chatgpt.WithBackground(), chatgpt.WithBro(bro)),
+		sceneMint:          sceneMint,
+		storeAccounts:      storeAccounts,
+		simpleLoginCleaner: simpleLoginCleaner,
 	}
 }
 
@@ -101,6 +103,7 @@ func (w *Worker) Renew(ctx context.Context) error {
 				return ctxErr
 			}
 			if errors.Is(err, chatgpt.ErrAccountDeactivated) {
+				w.cleanupDeactivatedAccount(account)
 				if removeErr := removeAccount(accountsFile, account.Email); removeErr != nil {
 					return removeErr
 				}
@@ -121,4 +124,30 @@ func (w *Worker) Renew(ctx context.Context) error {
 		slog.Info("账号更新完成", slog.String("email", account.Email))
 	}
 	return nil
+}
+
+func (w *Worker) cleanupDeactivatedAccount(account *chatgpt.Account) {
+	provider := strings.ToLower(strings.TrimSpace(account.MailProvider))
+	if provider != mail.AddressProviderSimpleLogin {
+		return
+	}
+	if w.simpleLoginCleaner == nil {
+		slog.Error("停用账号缺少 SimpleLogin 清理器", slog.String("email", account.Email))
+		return
+	}
+	if account.ProviderAddressID <= 0 || account.ProviderOwnerID <= 0 {
+		slog.Warn("停用账号缺少 SimpleLogin 别名元数据，跳过远程删除", slog.String("email", account.Email))
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	metadata := mail.AddressMetadata{
+		Email:     account.Email,
+		Provider:  mail.AddressProviderSimpleLogin,
+		AddressID: account.ProviderAddressID,
+		OwnerID:   account.ProviderOwnerID,
+	}
+	if err := w.simpleLoginCleaner.DelAddressByMetadata(cleanupCtx, metadata); err != nil {
+		slog.Error("删除停用账号邮箱地址失败", slog.String("email", account.Email), slog.String("provider", provider), slog.Any("err", err))
+	}
 }

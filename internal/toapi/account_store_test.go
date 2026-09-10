@@ -11,7 +11,7 @@ import (
 
 func TestAccountStoreKeepsLatestAccountPerEmail(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "accounts.jsonl")
-	for _, account := range []*chatgpt.Account{{Email: "first@example.com", Password: "old-password", ForwardMail: "first-forward@example.com"}, {Email: "second@example.com", Password: "second-password"}, {Email: "first@example.com", Password: "new-password", ForwardMail: "new-forward@example.com"}} {
+	for _, account := range []*chatgpt.Account{{Email: "first@example.com", Password: "old-password", ForwardMail: "first-forward@example.com"}, {Email: "second@example.com", Password: "second-password"}, {Email: "first@example.com", Password: "new-password", ForwardMail: "new-forward@example.com", MailProvider: "sl", ProviderAddressID: 42, ProviderOwnerID: 7}} {
 		if err := appendAccount(path, account); err != nil {
 			t.Fatal(err)
 		}
@@ -20,7 +20,7 @@ func TestAccountStoreKeepsLatestAccountPerEmail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(accounts) != 2 || accounts[0].Password != "new-password" || accounts[0].ForwardMail != "new-forward@example.com" {
+	if len(accounts) != 2 || accounts[0].Password != "new-password" || accounts[0].ForwardMail != "new-forward@example.com" || accounts[0].MailProvider != "sl" || accounts[0].ProviderAddressID != 42 || accounts[0].ProviderOwnerID != 7 {
 		t.Fatalf("accounts = %#v", accounts)
 	}
 	data, err := os.ReadFile(path)

@@ -2,8 +2,10 @@ package mail
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseSunMailDomains(t *testing.T) {
@@ -48,6 +50,37 @@ func TestNormalizeSunMailDomainsSkipsEmptyValues(t *testing.T) {
 		if domains[i] != want[i] {
 			t.Fatalf("normalizeSunMailDomains()[%d] = %q, want %q", i, domains[i], want[i])
 		}
+	}
+}
+
+func TestRetrySunMailRetriesEveryError(t *testing.T) {
+	oldInitialDelay, oldMaxDelay := sunMailRetryInitialDelay, sunMailRetryMaxDelay
+	sunMailRetryInitialDelay = time.Millisecond
+	sunMailRetryMaxDelay = time.Millisecond
+	defer func() {
+		sunMailRetryInitialDelay = oldInitialDelay
+		sunMailRetryMaxDelay = oldMaxDelay
+	}()
+
+	attempts := 0
+	body, err := retrySunMail(context.Background(), "test", func() ([]byte, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, context.DeadlineExceeded
+		}
+		if attempts < 3 {
+			return nil, errors.New("temporary failure")
+		}
+		return []byte("ok"), nil
+	})
+	if err != nil {
+		t.Fatalf("retrySunMail() error = %v", err)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("retrySunMail() body = %q, want ok", body)
+	}
+	if attempts != 3 {
+		t.Fatalf("retrySunMail() attempts = %d, want 3", attempts)
 	}
 }
 

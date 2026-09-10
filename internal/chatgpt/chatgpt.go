@@ -25,8 +25,10 @@ type Flow struct {
 	bro *rod.Browser
 	cpa *cpa.Client
 
-	background      bool
-	mailCodeTimeout time.Duration
+	background         bool
+	mailCodeInterval   time.Duration
+	mailCodeTimeout    time.Duration
+	mailCodeTimeoutSet bool
 }
 
 type Options func(*Flow)
@@ -55,14 +57,22 @@ func WithBackground() Options {
 	}
 }
 
+// WithMailCodeTimeout sets the optional overall timeout for waiting for a mail code.
 func WithMailCodeTimeout(timeout time.Duration) Options {
 	return func(w *Flow) {
 		w.mailCodeTimeout = timeout
+		w.mailCodeTimeoutSet = true
+	}
+}
+
+func WithMailCodeInterval(interval time.Duration) Options {
+	return func(w *Flow) {
+		w.mailCodeInterval = interval
 	}
 }
 
 func New(options ...Options) *Flow {
-	opts := &Flow{mailCodeTimeout: defaultMailCodeTimeout}
+	opts := &Flow{mailCodeInterval: defaultMailCodeInterval}
 	for _, option := range options {
 		option(opts)
 	}
@@ -70,10 +80,13 @@ func New(options ...Options) *Flow {
 }
 
 type Account struct {
-	Email       string `json:"email"`
-	Password    string `json:"password,omitempty"`
-	ForwardMail string `json:"forward_mail"`
-	AccessToken string `json:"-"`
+	Email             string `json:"email"`
+	Password          string `json:"password,omitempty"`
+	ForwardMail       string `json:"forward_mail"`
+	MailProvider      string `json:"mail_provider,omitempty"`
+	ProviderAddressID int64  `json:"provider_address_id,omitempty"`
+	ProviderOwnerID   int64  `json:"provider_owner_id,omitempty"`
+	AccessToken       string `json:"-"`
 }
 
 func clickLogin(page *rod.Page) {
@@ -94,7 +107,19 @@ func clickLogin(page *rod.Page) {
 
 func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 	var name = "NOT SPECIFIED"
-	createdAddress := false
+	addressAcquired := false
+	addressCommitted := false
+	var addressMetadata mail.AddressMetadata
+	defer func() {
+		if !addressAcquired || addressCommitted {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if cleanupErr := f.m.DelAddressByMetadata(cleanupCtx, addressMetadata); cleanupErr != nil {
+			slog.Error("清理邮箱地址失败", slog.String("email", addressMetadata.Email), slog.Any("err", cleanupErr))
+		}
+	}()
 	if a == nil || a.Email == "" {
 		a = &Account{}
 		name = mail.GenerateName()
@@ -103,7 +128,12 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 			panic(err)
 		}
 		a.Email = address
-		createdAddress = true
+		addressMetadata = f.m.Metadata(address)
+		addressMetadata.Email = address
+		addressAcquired = true
+		a.MailProvider = addressMetadata.Provider
+		a.ProviderAddressID = addressMetadata.AddressID
+		a.ProviderOwnerID = addressMetadata.OwnerID
 	}
 
 	var err error
@@ -194,13 +224,6 @@ inputEmail:
 		}, func() {
 			page.MustElement(`button[name="intent"][value="resend"]`).MustClick()
 		}); err != nil {
-			if createdAddress && (errors.Is(err, ErrMailCodeTimeout) || errors.Is(err, context.DeadlineExceeded)) {
-				cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				if cleanupErr := f.m.DelAddress(cleanupCtx, a.Email); cleanupErr != nil {
-					slog.Error("删除超时邮箱失败", slog.String("email", a.Email), slog.Any("err", cleanupErr))
-				}
-				cancel()
-			}
 			panic(err)
 		}
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
@@ -264,7 +287,8 @@ inputEmail:
 	if strings.TrimSpace(a.AccessToken) == "" {
 		panic("access token is empty")
 	}
-	if createdAddress {
+	if addressAcquired {
+		addressCommitted = true
 		f.m.ForgetAddress(a.Email)
 	}
 	return a
@@ -286,8 +310,9 @@ func checkAccountDeactivated(page *rod.Page) error {
 }
 
 const (
-	timeout                = time.Second * 2
-	defaultMailCodeTimeout = 4 * time.Minute
+	timeout                 = time.Second * 2
+	defaultMailCodeInterval = 30 * time.Second
+	maxMailCodeResends      = 5
 
 	baseURL     = "https://chatgpt.com/"
 	passwordURL = "https://auth.openai.com/create-account/password"
@@ -297,11 +322,19 @@ const (
 )
 
 func (f *Flow) waitMailCode(ctx context.Context, forwardMail string, input func(code string), resend func()) error {
-	ch := f.m.WaitMailCode(ctx, forwardMail)
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-	timer := time.NewTimer(f.mailCodeTimeout)
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ch := f.m.WaitMailCode(waitCtx, forwardMail)
+	timer := time.NewTimer(f.mailCodeInterval)
 	defer timer.Stop()
+	var timeoutTimer *time.Timer
+	var timeoutCh <-chan time.Time
+	if f.mailCodeTimeoutSet {
+		timeoutTimer = time.NewTimer(f.mailCodeTimeout)
+		timeoutCh = timeoutTimer.C
+		defer timeoutTimer.Stop()
+	}
+	resendCount := 0
 	for {
 		select {
 		case code, ok := <-ch:
@@ -314,12 +347,17 @@ func (f *Flow) waitMailCode(ctx context.Context, forwardMail string, input func(
 			slog.Info("-> " + code.Value)
 			input(code.Value)
 			return nil
-		case <-ticker.C:
+		case <-timer.C:
+			if resendCount >= maxMailCodeResends {
+				return ErrMailCodeTimeout
+			}
 			if resend != nil {
 				slog.Info("-> 重新发送电子邮件")
 				resend()
 			}
-		case <-timer.C:
+			resendCount++
+			timer.Reset(f.mailCodeInterval)
+		case <-timeoutCh:
 			return ErrMailCodeTimeout
 		case <-ctx.Done():
 			return ctx.Err()

@@ -2,15 +2,24 @@ package mail
 
 import (
 	"context"
+	"strings"
 
 	"github.com/sunls24/gox"
 )
 
+type AddressMetadata struct {
+	Email     string
+	Provider  string
+	AddressID int64
+	OwnerID   int64
+}
+
 type IMailAddress interface {
 	NewAddress(ctx context.Context, name string) (string, error)
-	DelAddress(ctx context.Context, address string) error
+	DelAddressByMetadata(ctx context.Context, metadata AddressMetadata) error
 	ForgetAddress(address string)
 	ForwardAddress(ctx context.Context, address string) (string, error)
+	Metadata(address string) AddressMetadata
 }
 
 type IMailWait interface {
@@ -32,4 +41,8 @@ func From(address IMailAddress, wait IMailWait) IMail {
 		IMailAddress: address,
 		IMailWait:    wait,
 	}
+}
+
+func normalizeAddress(address string) string {
+	return strings.ToLower(strings.TrimSpace(address))
 }

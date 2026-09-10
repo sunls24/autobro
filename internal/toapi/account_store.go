@@ -15,6 +15,12 @@ import (
 
 const accountsFile = "accounts.jsonl"
 
+const AccountsFile = accountsFile
+
+func LoadAccounts(path string) ([]chatgpt.Account, error) {
+	return loadAccounts(path)
+}
+
 func appendAccount(path string, account *chatgpt.Account) error {
 	if account == nil || strings.TrimSpace(account.Email) == "" {
 		return errors.New("email is required")

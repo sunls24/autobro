@@ -20,7 +20,7 @@ func (m *many) NewAddress(ctx context.Context, name string) (string, error) {
 	return m.username + "." + nameToAddress(name) + "@manyme.com", nil
 }
 
-func (m *many) DelAddress(ctx context.Context, address string) error {
+func (m *many) DelAddressByMetadata(ctx context.Context, metadata AddressMetadata) error {
 	return nil
 }
 
@@ -31,6 +31,10 @@ func (m *many) ForwardAddress(ctx context.Context, address string) (string, erro
 		return "", errors.New("manyme forward address is required")
 	}
 	return m.forwardAddress, nil
+}
+
+func (m *many) Metadata(address string) AddressMetadata {
+	return AddressMetadata{Email: address, Provider: AddressProviderManyMe}
 }
 
 func NewManyMe(username, forwardAddress string) (IMailAddress, error) {
