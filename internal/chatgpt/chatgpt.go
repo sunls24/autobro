@@ -1,11 +1,10 @@
 package chatgpt
 
 import (
-	"codex-free/internal/browser"
-	"codex-free/internal/cpa"
-	"codex-free/internal/mail"
+	"autobro/internal/browser"
+	"autobro/internal/logging"
+	"autobro/internal/mail"
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -23,12 +22,19 @@ import (
 type Flow struct {
 	m   mail.IMail
 	bro *rod.Browser
-	cpa *cpa.Client
 
-	background         bool
+	lastStep string
+
 	mailCodeInterval   time.Duration
 	mailCodeTimeout    time.Duration
 	mailCodeTimeoutSet bool
+}
+
+// markStep 记录当前步骤用于失败归因，并在详细级别下输出诊断行。args 只随诊断行
+// 输出、不参与 lastStep，因此这些步骤被省略后仍保留失败归因所需的上下文。
+func (f *Flow) markStep(step string, args ...any) {
+	f.lastStep = step
+	logAuthTrace("浏览器", step, args...)
 }
 
 type Options func(*Flow)
@@ -42,18 +48,6 @@ func WithIMail(m mail.IMail) Options {
 func WithBro(bro *rod.Browser) Options {
 	return func(w *Flow) {
 		w.bro = bro
-	}
-}
-
-func WithCPA(cpa *cpa.Client) Options {
-	return func(w *Flow) {
-		w.cpa = cpa
-	}
-}
-
-func WithBackground() Options {
-	return func(w *Flow) {
-		w.background = true
 	}
 }
 
@@ -79,16 +73,6 @@ func New(options ...Options) *Flow {
 	return opts
 }
 
-type Account struct {
-	Email             string `json:"email"`
-	Password          string `json:"password,omitempty"`
-	ForwardMail       string `json:"forward_mail"`
-	MailProvider      string `json:"mail_provider,omitempty"`
-	ProviderAddressID int64  `json:"provider_address_id,omitempty"`
-	ProviderOwnerID   int64  `json:"provider_owner_id,omitempty"`
-	AccessToken       string `json:"-"`
-}
-
 func clickLogin(page *rod.Page) {
 	selector := `
 		button[data-testid="login-button"],
@@ -106,23 +90,24 @@ func clickLogin(page *rod.Page) {
 }
 
 func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
-	var name = "NOT SPECIFIED"
-	addressAcquired := false
-	addressCommitted := false
+	// name 用于注册新账号：既作为邮箱地址的本地部分，也填入资料页。
+	name := mail.GenerateName()
+	// cleanupAddress 为 true 时，本次新建的邮箱地址在失败后需要删除。
+	cleanupAddress := false
 	var addressMetadata mail.AddressMetadata
 	defer func() {
-		if !addressAcquired || addressCommitted {
+		if !cleanupAddress {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if cleanupErr := f.m.DelAddressByMetadata(cleanupCtx, addressMetadata); cleanupErr != nil {
-			slog.Error("清理邮箱地址失败", slog.String("email", addressMetadata.Email), slog.Any("err", cleanupErr))
+			logAuthFailure("浏览器", "清理邮箱地址", cleanupErr, slog.String("email", addressMetadata.Email))
 		}
 	}()
 	if a == nil || a.Email == "" {
 		a = &Account{}
-		name = mail.GenerateName()
+		f.markStep("创建邮箱地址")
 		address, err := f.m.NewAddress(ctx, name)
 		if err != nil {
 			panic(err)
@@ -130,7 +115,7 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 		a.Email = address
 		addressMetadata = f.m.Metadata(address)
 		addressMetadata.Email = address
-		addressAcquired = true
+		cleanupAddress = true
 		a.MailProvider = addressMetadata.Provider
 		a.ProviderAddressID = addressMetadata.AddressID
 		a.ProviderOwnerID = addressMetadata.OwnerID
@@ -138,6 +123,7 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 
 	var err error
 	if strings.TrimSpace(a.ForwardMail) == "" {
+		f.markStep("获取转发地址")
 		var forwardMail string
 		forwardMail, err = f.m.ForwardAddress(ctx, a.Email)
 		if err != nil {
@@ -147,24 +133,20 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 	}
 	forwardMail := a.ForwardMail
 
-	slog.Info("-> 邮箱地址：" + a.Email)
-	var page *rod.Page
-	if f.background {
-		page = browser.MustBackgroundPage(f.bro)
-	} else {
-		page = f.bro.MustPage()
-	}
+	logging.Sub("账号信息", slog.String("email", a.Email), slog.String("address", forwardMail))
+	f.markStep("打开浏览器页面")
+	page := browser.MustBackgroundPage(f.bro)
 	if page == nil {
 		panic("page is nil")
 	}
 	defer page.MustClose()
 
-	slog.Info("-> 清理登录状态")
+	f.markStep("清理登录状态")
 	if err = clearSession(page); err != nil {
 		panic(err)
 	}
 
-	slog.Info("-> 进入首页")
+	f.markStep("进入首页")
 	page.MustNavigate(baseURL)
 	page.MustWaitLoad()
 
@@ -183,11 +165,11 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 			Do()
 
 		if !emailFound {
-			slog.Info("-> 点击登录")
+			f.markStep("点击登录")
 			clickLogin(page)
 		}
 	}
-	slog.Info("-> 输入邮箱，点击继续")
+	f.markStep("输入邮箱并继续")
 	page.Timeout(timeout * 2).
 		MustElement("#email, #mobile-auth-email").
 		MustWaitVisible().
@@ -202,10 +184,10 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 	})
 
 inputEmail:
-	slog.Info("-> " + nowURL)
+	f.markStep("页面跳转", slog.String("url", nowURL))
 	switch nowURL {
 	case passwordURL:
-		slog.Info("-> 输入密码")
+		f.markStep("输入密码")
 		if a.Password == "" {
 			a.Password = gox.RandStr(11) + "@"
 		}
@@ -218,7 +200,7 @@ inputEmail:
 		}
 		fallthrough
 	case emailURL:
-		slog.Info("-> 等待验证码")
+		f.markStep("等待邮箱验证码")
 		if err = f.waitMailCode(ctx, forwardMail, func(code string) {
 			page.MustElement(`input[inputmode="numeric"]`).MustInput(code)
 		}, func() {
@@ -226,9 +208,11 @@ inputEmail:
 		}); err != nil {
 			panic(err)
 		}
+		f.markStep("校验邮箱验证码")
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
 			page.Timeout(timeout).MustElement(`button[name="intent"][value="validate"]`).MustClick()
 		}, checkAccountDeactivated)
+		logging.SubDone("邮箱验证码已校验")
 	default:
 		if strings.Contains(nowURL, "/auth/login_with") {
 			time.Sleep(time.Second * 1)
@@ -239,10 +223,11 @@ inputEmail:
 		unexpectedURL(nowURL)
 	}
 
-	slog.Info("-> " + nowURL)
+	f.markStep("页面跳转", slog.String("url", nowURL))
 	switch nowURL {
 	case aboutURL:
 		page.MustWaitLoad()
+		f.markStep("填写账号资料")
 		page.MustElement(`input[name="name"]`).MustInput(name)
 		page.Keyboard.MustType(input.Tab)
 		age := rand.IntN(10) + 18
@@ -254,7 +239,7 @@ inputEmail:
 			m := rand.IntN(12) + 1
 			d := rand.IntN(28) + 1
 			want := fmt.Sprintf("%04d-%02d-%02d", y, m, d)
-			slog.Info("-> birthday " + want)
+			f.markStep("填写生日", slog.String("birthday", want))
 
 			fillDateSegment(page, "year", fmt.Sprintf("%04d", y))
 			fillDateSegment(page, "month", fmt.Sprintf("%02d", m))
@@ -262,6 +247,7 @@ inputEmail:
 
 			page.Timeout(timeout).MustWait(`(want) => document.querySelector('input[name="birthday"]')?.value === want`, want)
 		}
+		f.markStep("创建账号")
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
 			page.Timeout(timeout).MustElement(`button[type="submit"][data-dd-action-name="Continue"]`).MustClick()
 		})
@@ -271,6 +257,7 @@ inputEmail:
 	}
 	switch nowURL {
 	case passkeyURL:
+		f.markStep("跳过 Passkey")
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
 			page.Timeout(timeout).MustElement(`[data-dd-action-name="skip create account enroll passkey"]`).MustClick()
 		})
@@ -278,24 +265,23 @@ inputEmail:
 	if nowURL != baseURL {
 		unexpectedURL(nowURL)
 	}
+	logging.SubDone("账号已创建")
 
-	slog.Info("-> 获取 access token")
+	f.markStep("获取访问令牌")
 	a.AccessToken = gjson.Get(page.MustEval(`async () => {
 		const res = await fetch("https://chatgpt.com/api/auth/session/")
 		return await res.text()
 	}`).String(), "accessToken").String()
 	if strings.TrimSpace(a.AccessToken) == "" {
-		panic("access token is empty")
+		panic("访问令牌为空")
 	}
-	if addressAcquired {
-		addressCommitted = true
+	logging.SubDone("访问令牌已获取")
+	if cleanupAddress {
+		cleanupAddress = false
 		f.m.ForgetAddress(a.Email)
 	}
 	return a
 }
-
-var ErrAccountDeactivated = errors.New("account deactivated")
-var ErrMailCodeTimeout = errors.New("mail code timeout")
 
 func checkAccountDeactivated(page *rod.Page) error {
 	body, err := page.Element("body")
@@ -309,60 +295,24 @@ func checkAccountDeactivated(page *rod.Page) error {
 	return nil
 }
 
-const (
-	timeout                 = time.Second * 2
-	defaultMailCodeInterval = 30 * time.Second
-	maxMailCodeResends      = 5
-
-	baseURL     = "https://chatgpt.com/"
-	passwordURL = "https://auth.openai.com/create-account/password"
-	emailURL    = "https://auth.openai.com/email-verification"
-	aboutURL    = "https://auth.openai.com/about-you"
-	passkeyURL  = "https://auth.openai.com/create-account-enroll-passkey"
-)
-
+// waitMailCode 等待转发邮箱收到验证码并写入页面。等待与重发策略由 waitForMailCode 提供。
 func (f *Flow) waitMailCode(ctx context.Context, forwardMail string, input func(code string), resend func()) error {
-	waitCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	ch := f.m.WaitMailCode(waitCtx, forwardMail)
-	timer := time.NewTimer(f.mailCodeInterval)
-	defer timer.Stop()
-	var timeoutTimer *time.Timer
-	var timeoutCh <-chan time.Time
-	if f.mailCodeTimeoutSet {
-		timeoutTimer = time.NewTimer(f.mailCodeTimeout)
-		timeoutCh = timeoutTimer.C
-		defer timeoutTimer.Stop()
-	}
-	resendCount := 0
-	for {
-		select {
-		case code, ok := <-ch:
-			if !ok {
-				return errors.New("waitMailCode: channel closed")
-			}
-			if code.Err != nil {
-				return fmt.Errorf("waitMailCode: %w", code.Err)
-			}
-			slog.Info("-> " + code.Value)
-			input(code.Value)
-			return nil
-		case <-timer.C:
-			if resendCount >= maxMailCodeResends {
-				return ErrMailCodeTimeout
-			}
-			if resend != nil {
-				slog.Info("-> 重新发送电子邮件")
-				resend()
-			}
-			resendCount++
-			timer.Reset(f.mailCodeInterval)
-		case <-timeoutCh:
-			return ErrMailCodeTimeout
-		case <-ctx.Done():
-			return ctx.Err()
+	code, err := waitForMailCode(ctx, f.m, forwardMail, mailCodeWait{
+		interval:   f.mailCodeInterval,
+		timeout:    f.mailCodeTimeout,
+		timeoutSet: f.mailCodeTimeoutSet,
+	}, func(context.Context) error {
+		if resend != nil {
+			resend()
 		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
+	f.markStep("收到邮箱验证码")
+	input(code)
+	return nil
 }
 
 func fillDateSegment(page *rod.Page, typ, val string) {

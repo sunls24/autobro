@@ -10,15 +10,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"codex-free/internal/chatgpt"
+	"autobro/internal/chatgpt"
 )
 
 const accountsFile = "accounts.jsonl"
 
-const AccountsFile = accountsFile
-
-func LoadAccounts(path string) ([]chatgpt.Account, error) {
-	return loadAccounts(path)
+// LoadStoredAccounts 读取默认账号文件；文件不存在时返回空列表。
+func LoadStoredAccounts() ([]chatgpt.Account, error) {
+	return loadAccounts(accountsFile)
 }
 
 func appendAccount(path string, account *chatgpt.Account) error {

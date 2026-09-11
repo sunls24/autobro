@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"codex-free/internal/chatgpt"
+	"autobro/internal/chatgpt"
 )
 
 func TestAccountStoreKeepsLatestAccountPerEmail(t *testing.T) {

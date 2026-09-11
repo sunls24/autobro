@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,44 +27,47 @@ type account struct {
 }
 
 type simpleLogin struct {
-	accounts      []account
-	currentIndex  int
-	aliases       map[string]aliasRecord
-	usedAddresses map[string]struct{}
-	reuseExisting bool
+	accounts          []account
+	currentIndex      int
+	aliases           map[string]aliasRecord
+	aliasCounts       []int
+	reusableAliases   [][]aliasCandidate
+	aliasCountsLoaded bool
 }
 
 type aliasRecord struct {
 	id           int64
 	accountIndex int
+	created      bool
 }
 
-type simpleLoginAlias struct {
-	ID        int64  `json:"id"`
-	Email     string `json:"email"`
-	Enabled   bool   `json:"enabled"`
-	Mailboxes []struct {
-		ID int64 `json:"id"`
-	} `json:"mailboxes"`
+type aliasCandidate struct {
+	email  string
+	record aliasRecord
 }
 
 type simpleLoginAliasesResponse struct {
 	Aliases []simpleLoginAlias `json:"aliases"`
 }
 
-type SimpleLoginOptions struct {
-	ReuseExisting bool
-	UsedAddresses []string
+type simpleLoginAlias struct {
+	ID    int64  `json:"id"`
+	Email string `json:"email"`
+	Note  string `json:"note"`
 }
 
-const simpleLoginAliasesPageSize = 20
+const (
+	simpleLoginAliasesPageSize  = 20
+	simpleLoginMaxAliases       = 4
+	simpleLoginRegistrationNote = "autobro:chatgpt:v1"
+)
 
 func (sl *simpleLogin) nextAccount() {
 	sl.currentIndex = (sl.currentIndex + 1) % len(sl.accounts)
-	slog.Info(
-		"SL: use next account",
-		slog.Int("index", sl.currentIndex),
-		slog.String("forward", sl.accounts[sl.currentIndex].forward),
+	logMailStep(
+		"SimpleLogin",
+		"切换账号",
+		slog.String("address", sl.accounts[sl.currentIndex].forward),
 	)
 }
 
@@ -80,82 +84,155 @@ func (sl *simpleLogin) auth() types.Pair[string] {
 }
 
 func (sl *simpleLogin) NewAddress(ctx context.Context, name string) (string, error) {
-	if sl.reuseExisting {
-		address, err := sl.reuseAddress(ctx)
+	if len(sl.accounts) == 0 {
+		return "", errors.New("SL: no account available")
+	}
+	if err := sl.ensureAliasCounts(ctx); err != nil {
+		return "", err
+	}
+	for attempts := 0; attempts < len(sl.accounts); attempts++ {
+		address, reused, err := sl.reuseAlias(ctx, sl.currentIndex)
 		if err != nil {
 			return "", err
 		}
-		if address != "" {
+		if reused {
 			return address, nil
 		}
-	}
-	address := nameToAddress(name)
-	return sl.newAddress(func() (string, error) {
-		options, err := sl.aliasOptions(ctx)
-		if err != nil {
-			return "", err
+		if sl.aliasCount(sl.currentIndex) < simpleLoginMaxAliases {
+			return sl.createAddress(ctx, name)
 		}
-		if len(options) == 0 {
-			return "", errors.New("SL: no alias suffix available")
-		}
-		return sl.aliasCustomNew(ctx, address, options[rand.IntN(len(options))].signedSuffix)
-	})
-}
-
-func (sl *simpleLogin) newAddress(create func() (string, error)) (string, error) {
-	var lastErr error
-	for attempts := 0; attempts < len(sl.accounts); attempts++ {
-		result, err := create()
-		if err == nil {
-			return result, nil
-		}
-		if !shouldRotateSimpleLoginAccount(err) {
-			return "", err
-		}
-		lastErr = err
 		if attempts < len(sl.accounts)-1 {
-			// 账号受限时最多绕账号列表一圈，避免递归漏试或无限重试。
 			sl.nextAccount()
 		}
 	}
-	if lastErr != nil {
-		return "", lastErr
-	}
-	return "", errors.New("SL: no account attempted")
+	return "", fmt.Errorf("SL: all accounts reached the %d-alias limit", simpleLoginMaxAliases)
 }
 
-func shouldRotateSimpleLoginAccount(err error) bool {
-	if err == nil {
-		return false
+func (sl *simpleLogin) ensureAliasCounts(ctx context.Context) error {
+	if sl.aliasCountsLoaded {
+		return nil
 	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "429") ||
-		strings.Contains(message, "maximum of 10 aliases")
+	// Renew only needs the mailbox identities; defer the alias scan until a new
+	// registration actually needs capacity accounting.
+	counts := make([]int, len(sl.accounts))
+	reusableAliases := make([][]aliasCandidate, len(sl.accounts))
+	for accountIndex, account := range sl.accounts {
+		count := 0
+		for pageID := 0; ; pageID++ {
+			aliases, err := sl.listAliases(ctx, accountIndex, pageID)
+			if err != nil {
+				return fmt.Errorf("SL: list aliases for %s: %w", account.forward, err)
+			}
+			count += len(aliases)
+			for _, alias := range aliases {
+				if alias.ID <= 0 || strings.TrimSpace(alias.Email) == "" {
+					return fmt.Errorf("SL: invalid alias for %s", account.forward)
+				}
+				if strings.TrimSpace(alias.Note) != simpleLoginRegistrationNote {
+					reusableAliases[accountIndex] = append(reusableAliases[accountIndex], aliasCandidate{
+						email: alias.Email,
+						record: aliasRecord{
+							id:           alias.ID,
+							accountIndex: accountIndex,
+						},
+					})
+				}
+			}
+			if len(aliases) < simpleLoginAliasesPageSize {
+				break
+			}
+		}
+		counts[accountIndex] = count
+		logMailDebug("SimpleLogin", "统计已有别名", slog.String("address", account.forward), slog.Int("count", count), slog.Int("可复用", len(reusableAliases[accountIndex])))
+	}
+	sl.aliasCounts = counts
+	sl.reusableAliases = reusableAliases
+	sl.aliasCountsLoaded = true
+	return nil
+}
+
+func (sl *simpleLogin) reuseAlias(ctx context.Context, accountIndex int) (string, bool, error) {
+	if accountIndex < 0 || accountIndex >= len(sl.reusableAliases) || len(sl.reusableAliases[accountIndex]) == 0 {
+		return "", false, nil
+	}
+	candidate := sl.reusableAliases[accountIndex][0]
+	if err := sl.markAliasUsed(ctx, candidate.record); err != nil {
+		return "", false, fmt.Errorf("SL: mark alias %s: %w", candidate.email, err)
+	}
+	sl.reusableAliases[accountIndex] = sl.reusableAliases[accountIndex][1:]
+	sl.trackAlias(candidate.email, candidate.record)
+	return candidate.email, true, nil
+}
+
+func (sl *simpleLogin) createAddress(ctx context.Context, name string) (string, error) {
+	address := nameToAddress(name)
+	options, err := sl.aliasOptions(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(options) == 0 {
+		return "", errors.New("SL: no alias suffix available")
+	}
+	return sl.aliasCustomNew(ctx, address, options[rand.IntN(len(options))].signedSuffix)
+}
+
+func (sl *simpleLogin) aliasCount(accountIndex int) int {
+	if accountIndex < 0 || accountIndex >= len(sl.aliasCounts) {
+		return 0
+	}
+	return sl.aliasCounts[accountIndex]
+}
+
+func (sl *simpleLogin) incrementAliasCount(accountIndex int) {
+	if accountIndex < 0 {
+		return
+	}
+	if accountIndex >= len(sl.aliasCounts) {
+		counts := make([]int, len(sl.accounts))
+		copy(counts, sl.aliasCounts)
+		sl.aliasCounts = counts
+	}
+	sl.aliasCounts[accountIndex]++
+}
+
+func (sl *simpleLogin) decrementAliasCount(accountIndex int) {
+	if accountIndex < 0 || accountIndex >= len(sl.aliasCounts) || sl.aliasCounts[accountIndex] == 0 {
+		return
+	}
+	sl.aliasCounts[accountIndex]--
 }
 
 func (sl *simpleLogin) DelAddressByMetadata(ctx context.Context, metadata AddressMetadata) error {
 	if metadata.Provider != "" && !strings.EqualFold(strings.TrimSpace(metadata.Provider), AddressProviderSimpleLogin) {
 		return fmt.Errorf("SL: unsupported metadata provider %q", metadata.Provider)
 	}
-	if metadata.AddressID <= 0 || metadata.OwnerID <= 0 {
-		return fmt.Errorf("SL: incomplete alias metadata for %s", metadata.Email)
-	}
-	accountIndex := -1
-	for i, account := range sl.accounts {
-		if account.mailboxId == metadata.OwnerID {
-			accountIndex = i
-			break
+	record, tracked := sl.aliases[normalizeAddress(metadata.Email)]
+	if tracked {
+		if !record.created {
+			sl.removeAlias(record, metadata.Email)
+			return nil
 		}
+	} else {
+		if metadata.AddressID <= 0 || metadata.OwnerID <= 0 {
+			return fmt.Errorf("SL: incomplete alias metadata for %s", metadata.Email)
+		}
+		accountIndex := -1
+		for i, account := range sl.accounts {
+			if account.mailboxId == metadata.OwnerID {
+				accountIndex = i
+				break
+			}
+		}
+		if accountIndex < 0 {
+			return fmt.Errorf("SL: mailbox owner not found: %d", metadata.OwnerID)
+		}
+		record = aliasRecord{id: metadata.AddressID, accountIndex: accountIndex, created: true}
 	}
-	if accountIndex < 0 {
-		return fmt.Errorf("SL: mailbox owner not found: %d", metadata.OwnerID)
-	}
-	record := aliasRecord{id: metadata.AddressID, accountIndex: accountIndex}
 	if err := sl.deleteAlias(ctx, record); err != nil {
-		sl.releaseUsed(record, metadata.Email)
 		return err
 	}
 	sl.removeAlias(record, metadata.Email)
+	sl.decrementAliasCount(record.accountIndex)
 	return nil
 }
 
@@ -171,27 +248,30 @@ func (sl *simpleLogin) deleteAlias(ctx context.Context, record aliasRecord) erro
 	return err
 }
 
+func (sl *simpleLogin) markAliasUsed(ctx context.Context, record aliasRecord) error {
+	if record.id <= 0 || record.accountIndex < 0 || record.accountIndex >= len(sl.accounts) {
+		return errors.New("SL: invalid alias record")
+	}
+	body, err := json.Marshal(map[string]string{"note": simpleLoginRegistrationNote})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, fmt.Sprintf("%s/aliases/%d", simpleAPIBase, record.id), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	_, err = client.Do(req, header.New().ContentTypeJSON().Add(types.NewPair("Authentication", sl.accounts[record.accountIndex].apiKey)).Get()...)
+	return err
+}
+
 func (sl *simpleLogin) removeAlias(record aliasRecord, address string) {
 	key := normalizeAddress(address)
 	if key != "" {
 		delete(sl.aliases, key)
-		delete(sl.usedAddresses, key)
 	}
 	for key, tracked := range sl.aliases {
 		if tracked == record {
 			delete(sl.aliases, key)
-			delete(sl.usedAddresses, key)
-		}
-	}
-}
-
-func (sl *simpleLogin) releaseUsed(record aliasRecord, address string) {
-	if key := normalizeAddress(address); key != "" {
-		delete(sl.usedAddresses, key)
-	}
-	for key, tracked := range sl.aliases {
-		if tracked == record {
-			delete(sl.usedAddresses, key)
 		}
 	}
 }
@@ -232,71 +312,6 @@ func (sl *simpleLogin) trackAlias(address string, record aliasRecord) {
 	sl.aliases[normalizeAddress(address)] = record
 }
 
-func (sl *simpleLogin) markAddressUsed(address string) {
-	if sl.usedAddresses == nil {
-		sl.usedAddresses = make(map[string]struct{})
-	}
-	sl.usedAddresses[normalizeAddress(address)] = struct{}{}
-}
-
-func (sl *simpleLogin) reuseAddress(ctx context.Context) (string, error) {
-	if len(sl.accounts) == 0 {
-		return "", errors.New("SL: no account available")
-	}
-	alias, accountIndex, err := sl.findAlias(ctx, func(candidate simpleLoginAlias) bool {
-		return candidate.ID > 0 && normalizeAddress(candidate.Email) != "" && candidate.Enabled && !sl.isAddressUsed(candidate.Email)
-	})
-	if err != nil {
-		return "", err
-	}
-	if accountIndex < 0 {
-		return "", nil
-	}
-	sl.currentIndex = accountIndex
-	record := aliasRecord{id: alias.ID, accountIndex: accountIndex}
-	sl.trackAlias(alias.Email, record)
-	sl.markAddressUsed(alias.Email)
-	slog := slog.With(slog.Int("index", accountIndex), slog.String("email", alias.Email))
-	slog.Info("SL: reuse existing alias")
-	return alias.Email, nil
-}
-
-func (sl *simpleLogin) isAddressUsed(address string) bool {
-	_, ok := sl.usedAddresses[normalizeAddress(address)]
-	return ok
-}
-
-func (sl *simpleLogin) findAlias(ctx context.Context, match func(simpleLoginAlias) bool) (simpleLoginAlias, int, error) {
-	for accountIndex := range sl.accounts {
-		for pageID := 0; ; pageID++ {
-			aliases, err := sl.listAliases(ctx, accountIndex, pageID)
-			if err != nil {
-				return simpleLoginAlias{}, -1, err
-			}
-			for _, alias := range aliases {
-				if match(alias) {
-					return alias, sl.aliasOwnerIndex(alias, accountIndex), nil
-				}
-			}
-			if len(aliases) < simpleLoginAliasesPageSize {
-				break
-			}
-		}
-	}
-	return simpleLoginAlias{}, -1, nil
-}
-
-func (sl *simpleLogin) aliasOwnerIndex(alias simpleLoginAlias, fallback int) int {
-	for _, mailbox := range alias.Mailboxes {
-		for accountIndex, account := range sl.accounts {
-			if mailbox.ID != 0 && mailbox.ID == account.mailboxId {
-				return accountIndex
-			}
-		}
-	}
-	return fallback
-}
-
 func (sl *simpleLogin) listAliases(ctx context.Context, accountIndex, pageID int) ([]simpleLoginAlias, error) {
 	if accountIndex < 0 || accountIndex >= len(sl.accounts) {
 		return nil, fmt.Errorf("SL: invalid account index: %d", accountIndex)
@@ -322,9 +337,7 @@ func (sl *simpleLogin) listAliases(ctx context.Context, accountIndex, pageID int
 var simpleAPIBase = "https://app.simplelogin.io/api"
 
 type suffix struct {
-	isPremium    bool
 	signedSuffix string
-	suffix       string
 }
 
 func (sl *simpleLogin) aliasOptions(ctx context.Context) ([]suffix, error) {
@@ -333,14 +346,10 @@ func (sl *simpleLogin) aliasOptions(ctx context.Context) ([]suffix, error) {
 	if err != nil {
 		return nil, err
 	}
-	slog.Debug("SL: aliasOptions\n" + string(body))
+	logMailDebug("SimpleLogin", "获取别名选项", slog.String("body", string(body)))
 	suffixes := gjson.GetBytes(body, "suffixes").Array()
 	return gox.Map(suffixes, func(r gjson.Result) suffix {
-		return suffix{
-			isPremium:    r.Get("is_premium").Bool(),
-			signedSuffix: r.Get("signed_suffix").String(),
-			suffix:       r.Get("suffix").String(),
-		}
+		return suffix{signedSuffix: r.Get("signed_suffix").String()}
 	}), nil
 }
 
@@ -350,33 +359,34 @@ func (sl *simpleLogin) aliasCustomNew(ctx context.Context, custom string, signed
 		"alias_prefix":  custom,
 		"signed_suffix": signedSuffix,
 		"mailbox_ids":   []int64{sl.mailboxId()},
+		"note":          simpleLoginRegistrationNote,
 	}, header.New().ContentTypeJSON().Add(sl.auth()).Get()...)
 	if err != nil {
 		return "", err
 	}
-	slog.Debug("SL: aliasCustomNew\n" + string(body))
+	logMailDebug("SimpleLogin", "创建别名", slog.String("body", string(body)))
 	email := gjson.GetBytes(body, "email").String()
 	aliasID := gjson.GetBytes(body, "id").Int()
 	if email == "" || aliasID == 0 {
 		return "", errors.New("SL: invalid alias response")
 	}
-	record := aliasRecord{id: aliasID, accountIndex: sl.currentIndex}
+	record := aliasRecord{id: aliasID, accountIndex: sl.currentIndex, created: true}
 	sl.trackAlias(email, record)
-	sl.markAddressUsed(email)
+	sl.incrementAliasCount(sl.currentIndex)
 	return email, nil
 }
 
-func NewSimpleLogin(ctx context.Context, apiKeys []string, option SimpleLoginOptions) (IMailAddress, error) {
+func NewSimpleLogin(ctx context.Context, apiKeys []string) (IMailAddress, error) {
 	const PATH = "/v2/mailboxes"
 
 	accounts := make([]account, 0, len(apiKeys))
-	for i, apiKey := range apiKeys {
+	for _, apiKey := range apiKeys {
 		body, err := client.Get(ctx, simpleAPIBase+PATH, types.NewPair("Authentication", apiKey))
 		if err != nil {
-			slog.Error("SL: get mailboxes", slog.Any("err", err), slog.Int("index", i))
+			logMailFailure("SimpleLogin", "获取邮箱列表", err)
 			continue
 		}
-		slog.Debug("SL: mailboxes\n" + string(body))
+		logMailDebug("SimpleLogin", "获取邮箱列表", slog.String("body", string(body)))
 		for _, box := range gjson.GetBytes(body, "mailboxes").Array() {
 			verified := box.Get("verified").Bool()
 			if !verified {
@@ -384,7 +394,7 @@ func NewSimpleLogin(ctx context.Context, apiKeys []string, option SimpleLoginOpt
 			}
 			id := box.Get("id").Int()
 			email := box.Get("email").String()
-			slog.Debug("SL: add account", slog.String("forward", email), slog.Int64("mailboxId", id))
+			logMailDebug("SimpleLogin", "添加邮箱账号", slog.String("address", email), slog.Int64("mailboxId", id))
 			accounts = append(accounts, account{
 				mailboxId: id,
 				apiKey:    apiKey,
@@ -396,14 +406,8 @@ func NewSimpleLogin(ctx context.Context, apiKeys []string, option SimpleLoginOpt
 	if len(accounts) == 0 {
 		return nil, errors.New("SL: no valid account found")
 	}
-	usedAddresses := make(map[string]struct{}, len(option.UsedAddresses))
-	for _, address := range option.UsedAddresses {
-		usedAddresses[normalizeAddress(address)] = struct{}{}
-	}
 	return &simpleLogin{
-		accounts:      accounts,
-		aliases:       make(map[string]aliasRecord),
-		usedAddresses: usedAddresses,
-		reuseExisting: option.ReuseExisting,
+		accounts: accounts,
+		aliases:  make(map[string]aliasRecord),
 	}, nil
 }

@@ -6,70 +6,90 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/launcher/flags"
 	"github.com/go-rod/rod/lib/proto"
 )
 
-// NewDefault 默认使用本机 chrome/chromium 在 ~/.config/rod/data 目录启动浏览器
-func NewDefault(headless bool) (*rod.Browser, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-	dataDir := filepath.Join(home, ".config", "rod", "data")
-	if err = os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create data dir %q: %w", dataDir, err)
-	}
-	if err = removeStaleSingletonFiles(dataDir); err != nil {
-		return nil, err
-	}
-
-	return newBro(headless, dataDir)
+// Session owns the browser process and account-scoped browser context for a
+// single account attempt. Pages created from Browser belong to this session.
+type Session struct {
+	browser   *rod.Browser
+	launcher  *launcher.Launcher
+	closeOnce sync.Once
+	closeErr  error
 }
 
-func removeStaleSingletonFiles(dataDir string) error {
-	lockPath := filepath.Join(dataDir, "SingletonLock")
-	lock, err := os.Readlink(lockPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read browser singleton lock: %w", err)
-	}
+const browserCloseTimeout = 5 * time.Second
 
-	hostname, err := os.Hostname()
+// NewSession creates a fresh temporary browser profile for one account.
+func NewSession(headless bool) (*Session, error) {
+	browser, l, err := launchBrowser(headless)
 	if err != nil {
-		return fmt.Errorf("get hostname: %w", err)
+		return nil, err
 	}
-	pidText, ok := strings.CutPrefix(lock, hostname+"-")
-	if !ok {
-		return nil
-	}
-	pid, err := strconv.Atoi(pidText)
-	if err != nil {
-		return nil
-	}
-	if err = syscall.Kill(pid, 0); err == nil || !errors.Is(err, syscall.ESRCH) {
-		return nil
-	}
+	return &Session{
+		browser:  browser,
+		launcher: l,
+	}, nil
+}
 
-	for _, name := range []string{"SingletonLock", "SingletonCookie", "SingletonSocket"} {
-		path := filepath.Join(dataDir, name)
-		if err = os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove stale browser singleton file %q: %w", path, err)
+// Browser returns the account-scoped browser context owned by the session.
+func (s *Session) Browser() *rod.Browser {
+	if s == nil {
+		return nil
+	}
+	return s.browser
+}
+
+// Close disposes the account browser, process, and temporary profile.
+func (s *Session) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		var closeErr error
+		if s.browser != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), browserCloseTimeout)
+			closeErr = s.browser.Context(ctx).Close()
+			cancel()
 		}
+		if closeErr != nil {
+			s.closeErr = errors.Join(s.closeErr, fmt.Errorf("close browser: %w", closeErr))
+		}
+		if s.launcher != nil {
+			// The session owns this browser process. Cleanup waits indefinitely on
+			// the launcher exit signal, so terminate the process group explicitly
+			// and remove the session-scoped profile without another wait.
+			s.launcher.Kill()
+			s.closeErr = errors.Join(s.closeErr, cleanupProfile(s.launcher))
+		} else {
+			s.closeErr = errors.Join(s.closeErr, closeErr)
+		}
+	})
+	return s.closeErr
+}
+
+func cleanupProfile(l *launcher.Launcher) error {
+	dir := filepath.Clean(l.Get(flags.UserDataDir))
+	root := filepath.Clean(launcher.DefaultUserDataDirPrefix)
+	if dir == "." || dir == root {
+		return errors.New("refusing to remove the browser data root")
+	}
+
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("refusing to remove browser profile outside %q: %q", root, dir)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove browser profile %q: %w", dir, err)
 	}
 	return nil
-}
-
-func NewTemp(headless bool) (*rod.Browser, error) {
-	return newBro(headless, "")
 }
 
 func MustBackgroundPage(b *rod.Browser) *rod.Page {
@@ -83,30 +103,29 @@ func MustBackgroundPage(b *rod.Browser) *rod.Page {
 	return page
 }
 
-func newBro(headless bool, dataDir string) (*rod.Browser, error) {
+func launchBrowser(headless bool) (*rod.Browser, *launcher.Launcher, error) {
 	binPath, ok := launcher.LookPath()
 	if !ok {
-		return nil, errors.New("could not find chrome/chromium executable")
+		return nil, nil, errors.New("could not find chrome/chromium executable")
 	}
 	l := launcher.New().
 		Bin(binPath).
 		HeadlessNew(headless).
 		Set("disable-blink-features", "AutomationControlled")
-	if dataDir != "" {
-		l.UserDataDir(dataDir)
-	}
 	u, err := l.Launch()
 	if err != nil {
-		return nil, fmt.Errorf("launch browser: %w", err)
+		return nil, nil, fmt.Errorf("launch browser: %w", err)
 	}
 
 	browser := rod.New().
 		ControlURL(u).
 		NoDefaultDevice()
 	if err = browser.Connect(); err != nil {
-		return nil, fmt.Errorf("connect browser: %w", err)
+		l.Kill()
+		l.Cleanup()
+		return nil, nil, fmt.Errorf("connect browser: %w", err)
 	}
-	return browser, nil
+	return browser, l, nil
 }
 
 func WaitURLChange(ctx context.Context, page *rod.Page, action func(), checks ...func(*rod.Page) error) (string, error) {

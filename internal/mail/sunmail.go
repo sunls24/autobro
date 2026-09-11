@@ -21,7 +21,6 @@ var _ IMailAddress = (*sunMail)(nil)
 
 type sunMail struct {
 	domains []string
-	current string
 	apiKey  string
 }
 
@@ -73,8 +72,8 @@ func (sm *sunMail) NewAddress(ctx context.Context, name string) (string, error) 
 	if err := sm.fetchDomain(ctx); err != nil {
 		return "", err
 	}
-	sm.current = nameToAddress(name) + "@" + sm.domains[rand.IntN(len(sm.domains))]
-	return sm.current, nil
+	address := nameToAddress(name) + "@" + sm.domains[rand.IntN(len(sm.domains))]
+	return address, nil
 }
 
 var sunMailBaseURL = "https://prod.sunlss.com/api"
@@ -94,7 +93,7 @@ func retrySunMail(ctx context.Context, operation string, request func() ([]byte,
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("SunMail %s: %w (last error: %v)", operation, ctxErr, err)
 		}
-		slog.Warn("SunMail request failed, retrying", slog.String("operation", operation), slog.Int("attempt", attempt), slog.Any("err", err))
+		logMailWarning("SunMail", "请求重试", slog.String("operation", operation), slog.Int("attempt", attempt), slog.Any("err", err))
 		if waitErr := waitContext(ctx, delay); waitErr != nil {
 			return nil, fmt.Errorf("SunMail %s: %w (last request error: %v)", operation, waitErr, err)
 		}
@@ -149,7 +148,7 @@ func (sm *sunMail) fetchMailDetail(ctx context.Context, address, id string) ([]b
 }
 
 func (sm *sunMail) waitMailCode(ctx context.Context, address string) (string, error) {
-	slog.Info("stat wait mail code", slog.String("address", address))
+	logMailDebug("SunMail", "等待邮箱验证码", slog.String("email", address))
 	start := time.Now().Unix()
 	for {
 		if err := waitContext(ctx, time.Second); err != nil {

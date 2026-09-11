@@ -2,9 +2,10 @@ package mail
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 )
 
@@ -42,23 +43,166 @@ func TestSimpleLoginForgetAddressReleasesRecord(t *testing.T) {
 	}
 }
 
-func TestSimpleLoginReusesAliasAndDeletesByMetadata(t *testing.T) {
-	var gotDeleteAuth string
+func TestSimpleLoginCountsAliasesAndRotatesAfterFour(t *testing.T) {
+	var gotCreateAuth string
+	var gotCreateNote string
+	aliasListRequests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		auth := r.Header.Get("Authentication")
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v2/mailboxes":
+			switch auth {
+			case "first-key":
+				_, _ = w.Write([]byte(`{"mailboxes":[{"id":11,"email":"first@example.com","verified":true}]}`))
+			case "second-key":
+				_, _ = w.Write([]byte(`{"mailboxes":[{"id":22,"email":"second@example.com","verified":true}]}`))
+			default:
+				http.Error(w, "unexpected key", http.StatusUnauthorized)
+			}
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/aliases":
+			aliasListRequests++
 			if r.URL.Query().Get("page_id") != "0" {
 				http.Error(w, "unexpected page", http.StatusBadRequest)
 				return
 			}
-			_, _ = w.Write([]byte(`{"aliases":[{"id":7,"email":"free@example.com","enabled":true,"mailboxes":[{"id":22}]}]}`))
-		case r.Method == http.MethodDelete && r.URL.Path == "/aliases/7":
-			gotDeleteAuth = r.Header.Get("Authentication")
-			_, _ = w.Write([]byte(`{"deleted":true}`))
+			if auth == "first-key" {
+				_, _ = w.Write([]byte(`{"aliases":[{"id":1,"email":"first-1@example.com","note":"autobro:chatgpt:v1"},{"id":2,"email":"first-2@example.com","note":"autobro:chatgpt:v1"},{"id":3,"email":"first-3@example.com","note":"autobro:chatgpt:v1"},{"id":4,"email":"first-4@example.com","note":"autobro:chatgpt:v1"},{"id":5,"email":"first-5@example.com","note":"autobro:chatgpt:v1"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"aliases":[{"id":10,"email":"second-used@example.com","note":"autobro:chatgpt:v1"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v5/alias/options":
+			gotCreateAuth = auth
+			_, _ = w.Write([]byte(`{"suffixes":[{"signed_suffix":"suffix"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v3/alias/custom/new":
+			gotCreateAuth = auth
+			var payload struct {
+				Note string `json:"note"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			gotCreateNote = payload.Note
+			_, _ = w.Write([]byte(`{"id":6,"email":"created@example.com"}`))
 		default:
 			http.NotFound(w, r)
 		}
+	}))
+	defer server.Close()
+
+	oldBase := simpleAPIBase
+	simpleAPIBase = server.URL
+	defer func() { simpleAPIBase = oldBase }()
+
+	addressProvider, err := NewSimpleLogin(context.Background(), []string{"first-key", "second-key"})
+	if err != nil {
+		t.Fatalf("NewSimpleLogin() error = %v", err)
+	}
+	sl := addressProvider.(*simpleLogin)
+
+	address, err := sl.NewAddress(context.Background(), "ignored")
+	if err != nil {
+		t.Fatalf("NewAddress() error = %v", err)
+	}
+	if address != "created@example.com" {
+		t.Fatalf("NewAddress() = %q, want created@example.com", address)
+	}
+	if sl.currentIndex != 1 {
+		t.Fatalf("currentIndex = %d, want 1", sl.currentIndex)
+	}
+	if got, want := sl.aliasCounts, []int{5, 2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("aliasCounts = %v, want %v", got, want)
+	}
+	if aliasListRequests != 2 {
+		t.Fatalf("alias list requests during first allocation = %d, want 2", aliasListRequests)
+	}
+	if gotCreateAuth != "second-key" {
+		t.Fatalf("create Authentication = %q, want second-key", gotCreateAuth)
+	}
+	if gotCreateNote != simpleLoginRegistrationNote {
+		t.Fatalf("create note = %q, want %q", gotCreateNote, simpleLoginRegistrationNote)
+	}
+}
+
+func TestSimpleLoginReusesUnmarkedAliasAndDoesNotDeleteIt(t *testing.T) {
+	var gotPatchAuth string
+	var gotPatchNote string
+	deleteCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v2/mailboxes":
+			_, _ = w.Write([]byte(`{"mailboxes":[{"id":11,"email":"first@example.com","verified":true}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v2/aliases":
+			_, _ = w.Write([]byte(`{"aliases":[{"id":7,"email":"existing@example.com","note":"This is your first alias."},{"id":8,"email":"used-1@example.com","note":"autobro:chatgpt:v1"},{"id":9,"email":"used-2@example.com","note":"autobro:chatgpt:v1"},{"id":10,"email":"used-3@example.com","note":"autobro:chatgpt:v1"}]}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/aliases/7":
+			gotPatchAuth = r.Header.Get("Authentication")
+			var payload struct {
+				Note string `json:"note"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			gotPatchNote = payload.Note
+			_, _ = w.Write([]byte(`{"note":"autobro:chatgpt:v1"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/aliases/7":
+			deleteCalled = true
+			http.Error(w, "reused alias must not be deleted", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldBase := simpleAPIBase
+	simpleAPIBase = server.URL
+	defer func() { simpleAPIBase = oldBase }()
+
+	addressProvider, err := NewSimpleLogin(context.Background(), []string{"first-key"})
+	if err != nil {
+		t.Fatalf("NewSimpleLogin() error = %v", err)
+	}
+	sl := addressProvider.(*simpleLogin)
+
+	address, err := sl.NewAddress(context.Background(), "ignored")
+	if err != nil {
+		t.Fatalf("NewAddress() error = %v", err)
+	}
+	if address != "existing@example.com" {
+		t.Fatalf("NewAddress() = %q, want existing@example.com", address)
+	}
+	if gotPatchAuth != "first-key" {
+		t.Fatalf("patch Authentication = %q, want first-key", gotPatchAuth)
+	}
+	if gotPatchNote != simpleLoginRegistrationNote {
+		t.Fatalf("patch note = %q, want %q", gotPatchNote, simpleLoginRegistrationNote)
+	}
+	metadata := sl.Metadata(address)
+	if metadata.AddressID != 7 || metadata.OwnerID != 11 {
+		t.Fatalf("Metadata() = %#v, want id 7 and owner 11", metadata)
+	}
+	if err := sl.DelAddressByMetadata(context.Background(), metadata); err != nil {
+		t.Fatalf("DelAddressByMetadata() error = %v", err)
+	}
+	if deleteCalled {
+		t.Fatal("reused alias was deleted")
+	}
+	if got, want := sl.aliasCounts, []int{4}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("aliasCounts = %v, want %v", got, want)
+	}
+}
+
+func TestSimpleLoginDeletesAliasAndReleasesCount(t *testing.T) {
+	var gotDeleteAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/aliases/7" {
+			http.NotFound(w, r)
+			return
+		}
+		gotDeleteAuth = r.Header.Get("Authentication")
+		_, _ = w.Write([]byte(`{"deleted":true}`))
 	}))
 	defer server.Close()
 
@@ -71,97 +215,23 @@ func TestSimpleLoginReusesAliasAndDeletesByMetadata(t *testing.T) {
 			{mailboxId: 11, apiKey: "first-key", forward: "first@example.com"},
 			{mailboxId: 22, apiKey: "owner-key", forward: "owner@example.com"},
 		},
-		aliases:       make(map[string]aliasRecord),
-		usedAddresses: map[string]struct{}{"used@example.com": {}},
-		reuseExisting: true,
+		aliases:     map[string]aliasRecord{"created@example.com": {id: 7, accountIndex: 1, created: true}},
+		aliasCounts: []int{0, 4},
+	}
+	metadata := AddressMetadata{
+		Email:     "created@example.com",
+		Provider:  AddressProviderSimpleLogin,
+		AddressID: 7,
+		OwnerID:   22,
 	}
 
-	address, err := sl.NewAddress(context.Background(), "ignored")
-	if err != nil {
-		t.Fatalf("NewAddress() error = %v", err)
-	}
-	if address != "free@example.com" {
-		t.Fatalf("NewAddress() = %q, want free@example.com", address)
-	}
-	metadata := sl.Metadata(address)
-	if metadata.AddressID != 7 || metadata.OwnerID != 22 {
-		t.Fatalf("Metadata() = %+v, want address=7 owner=22", metadata)
-	}
-	if got, err := sl.ForwardAddress(context.Background(), address); err != nil || got != "owner@example.com" {
-		t.Fatalf("ForwardAddress() = %q, %v, want owner@example.com", got, err)
-	}
-	// 删除只依赖持久化的 ID，不依赖当前进程里的 alias 缓存。
-	sl.aliases = make(map[string]aliasRecord)
 	if err := sl.DelAddressByMetadata(context.Background(), metadata); err != nil {
 		t.Fatalf("DelAddressByMetadata() error = %v", err)
 	}
 	if gotDeleteAuth != "owner-key" {
 		t.Fatalf("delete Authentication = %q, want owner-key", gotDeleteAuth)
 	}
-	if _, ok := sl.usedAddresses["free@example.com"]; ok {
-		t.Fatal("deleted alias remains marked used")
-	}
-}
-
-func TestSimpleLoginNewAddressRotatesRestrictedAccounts(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-	}{
-		{
-			name: "rate limited",
-			err:  errors.New("429 TOO MANY REQUESTS"),
-		},
-		{
-			name: "free alias limit",
-			err:  errors.New(`400 BAD REQUEST: {"error":"You have reached the limitation of a free account with the maximum of 10 aliases, please upgrade your plan to create more aliases"}`),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sl := &simpleLogin{accounts: []account{{apiKey: "first"}, {apiKey: "second"}}}
-			attempts := 0
-
-			address, err := sl.newAddress(func() (string, error) {
-				attempts++
-				if sl.currentIndex == 0 {
-					return "", tt.err
-				}
-				return "created@example.com", nil
-			})
-			if err != nil {
-				t.Fatalf("newAddress() error = %v", err)
-			}
-			if address != "created@example.com" {
-				t.Fatalf("newAddress() address = %q", address)
-			}
-			if attempts != 2 {
-				t.Fatalf("newAddress() attempts = %d, want 2", attempts)
-			}
-			if sl.currentIndex != 1 {
-				t.Fatalf("currentIndex = %d, want 1", sl.currentIndex)
-			}
-		})
-	}
-}
-
-func TestSimpleLoginNewAddressDoesNotRotateOtherErrors(t *testing.T) {
-	sl := &simpleLogin{accounts: []account{{apiKey: "first"}, {apiKey: "second"}}}
-	wantErr := errors.New("400 BAD REQUEST: invalid alias")
-	attempts := 0
-
-	_, err := sl.newAddress(func() (string, error) {
-		attempts++
-		return "", wantErr
-	})
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("newAddress() error = %v, want %v", err, wantErr)
-	}
-	if attempts != 1 {
-		t.Fatalf("newAddress() attempts = %d, want 1", attempts)
-	}
-	if sl.currentIndex != 0 {
-		t.Fatalf("currentIndex = %d, want 0", sl.currentIndex)
+	if got, want := sl.aliasCounts, []int{0, 3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("aliasCounts = %v, want %v", got, want)
 	}
 }

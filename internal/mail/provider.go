@@ -14,8 +14,6 @@ const (
 
 type AddressProviderConfig struct {
 	SLAPIKeys            []string
-	SLReuseExisting      bool
-	SLUsedAddresses      []string
 	SunMailAPIKey        string
 	SunMailDomains       []string
 	ManyMeUsername       string
@@ -25,10 +23,7 @@ type AddressProviderConfig struct {
 func NewAddressProvider(ctx context.Context, provider string, cfg AddressProviderConfig) (IMailAddress, error) {
 	switch NormalizeAddressProvider(provider) {
 	case AddressProviderSimpleLogin:
-		return NewSimpleLogin(ctx, cfg.SLAPIKeys, SimpleLoginOptions{
-			ReuseExisting: cfg.SLReuseExisting,
-			UsedAddresses: cfg.SLUsedAddresses,
-		})
+		return NewSimpleLogin(ctx, cfg.SLAPIKeys)
 	case AddressProviderSunMail:
 		return NewSunMail(cfg.SunMailAPIKey, cfg.SunMailDomains...), nil
 	case AddressProviderManyMe:
@@ -44,10 +39,12 @@ func NewAddressProvider(ctx context.Context, provider string, cfg AddressProvide
 	}
 }
 
+// NormalizeAddressProvider 归一化邮箱地址实现名。空值与 CLI 的 -m 默认值一致，
+// 取 SunMail，避免显式传入空值时静默切换到别的实现。
 func NormalizeAddressProvider(provider string) string {
 	p := strings.ToLower(strings.TrimSpace(provider))
 	if p == "" {
-		return AddressProviderSimpleLogin
+		return AddressProviderSunMail
 	}
 	return p
 }

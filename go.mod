@@ -1,4 +1,4 @@
-module codex-free
+module autobro
 
 go 1.25.5
 

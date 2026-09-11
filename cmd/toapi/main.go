@@ -1,14 +1,15 @@
 package main
 
 import (
-	"codex-free/internal/browser"
-	"codex-free/internal/chatgpt"
-	"codex-free/internal/mail"
-	"codex-free/internal/scenemint"
-	"codex-free/internal/toapi"
+	"autobro/internal/browser"
+	"autobro/internal/chatgpt"
+	"autobro/internal/mail"
+	"autobro/internal/scenemint"
+	"autobro/internal/toapi"
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +18,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"autobro/internal/logging"
+
+	"github.com/go-rod/rod"
 )
 
 type optionalBool struct {
@@ -46,100 +51,97 @@ func (b *optionalBool) IsBoolFlag() bool {
 }
 
 func main() {
+	logging.Configure(slog.LevelInfo)
+	logging.Step("程序", "启动", slog.String("date", time.Now().Format("2006-01-02")))
+	if err := run(); err != nil && !errors.Is(err, context.Canceled) {
+		logging.Failure("程序", "运行", err)
+		os.Exit(1)
+	}
+}
+
+func run() (err error) {
 	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport = transport.Clone()
 		transport.TLSHandshakeTimeout = time.Minute
 		http.DefaultTransport = transport
 	}
-	//slog.SetLogLoggerLevel(slog.LevelDebug)
 	cfg := toapi.MustNew()
 	count := flag.Int("c", 10, "注册数量")
-	mailProvider := flag.String("m", mail.AddressProviderSimpleLogin, "邮箱地址实现: sl, sun 或 mm")
+	protocolMode := flag.Bool("p", false, "使用协议混合认证；默认使用浏览器")
+	mailProvider := flag.String("m", mail.AddressProviderSunMail, "邮箱地址实现: sun, sl 或 mm")
 	sunMailDomains := flag.String("d", "", "SunMail 域名后缀，多个用逗号分隔")
 	renew := flag.Bool("r", false, "更新需要重新登录的账号")
 	saveAccounts := &optionalBool{}
-	flag.Var(saveAccounts, "s", "保存账号；默认仅 sl 保存，可用 -s=false 关闭")
+	flag.Var(saveAccounts, "s", "保存账号；默认仅 sl 保存，sun/mm 需显式开启；可用 -s=false 关闭")
+	verbose := flag.Bool("v", false, "输出默认省略的详细步骤日志")
 	flag.Parse()
+	if *verbose {
+		logging.Configure(slog.LevelDebug)
+	}
 	provider := mail.NormalizeAddressProvider(*mailProvider)
 	storeAccounts := provider == mail.AddressProviderSimpleLogin
 	if saveAccounts.set {
 		storeAccounts = saveAccounts.value
 	}
 	if !*renew && *count <= 0 {
-		panic("count must be greater than 0")
+		return errors.New("注册数量必须大于 0")
 	}
 	domains := strings.Split(*sunMailDomains, ",")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var err error
-	var savedAccounts []chatgpt.Account
-	if (provider == mail.AddressProviderSimpleLogin && storeAccounts && !*renew) || *renew {
-		savedAccounts, err = toapi.LoadAccounts(toapi.AccountsFile)
-		if err != nil {
-			panic(err)
-		}
-	}
-	usedAddresses := make([]string, 0, len(savedAccounts))
-	if provider == mail.AddressProviderSimpleLogin && storeAccounts && !*renew {
-		for _, account := range savedAccounts {
-			if account.MailProvider == "" || strings.EqualFold(strings.TrimSpace(account.MailProvider), mail.AddressProviderSimpleLogin) {
-				usedAddresses = append(usedAddresses, account.Email)
-			}
-		}
-	}
-
 	address, err := mail.NewAddressProvider(ctx, provider, mail.AddressProviderConfig{
 		SLAPIKeys:            cfg.SLAPIKeys,
-		SLReuseExisting:      provider == mail.AddressProviderSimpleLogin && storeAccounts && !*renew,
-		SLUsedAddresses:      usedAddresses,
 		SunMailAPIKey:        cfg.SunMailAPIKey,
 		SunMailDomains:       domains,
 		ManyMeUsername:       cfg.ManyMeUsername,
 		ManyMeForwardAddress: cfg.ManyMeForwardAddress,
 	})
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("初始化邮箱服务失败: %w", err)
 	}
-	var simpleLoginCleaner mail.IMailAddress
-	if provider == mail.AddressProviderSimpleLogin {
-		simpleLoginCleaner = address
-	} else if *renew {
-		needSimpleLoginCleaner := false
-		for _, account := range savedAccounts {
-			if strings.EqualFold(strings.TrimSpace(account.MailProvider), mail.AddressProviderSimpleLogin) {
-				needSimpleLoginCleaner = true
-				break
+	mailService := mail.From(address, mail.NewSunMail(cfg.SunMailAPIKey))
+	authenticatorFactory := func() (chatgpt.Authenticator, func() error, error) {
+		if *protocolMode {
+			var session *browser.Session
+			newBrowser := func() (*rod.Browser, error) {
+				if session != nil {
+					return session.Browser(), nil
+				}
+				created, sessionErr := browser.NewSession(false)
+				if sessionErr != nil {
+					return nil, sessionErr
+				}
+				session = created
+				return session.Browser(), nil
 			}
-		}
-		if needSimpleLoginCleaner {
-			slCleaner, cleanerErr := mail.NewAddressProvider(ctx, mail.AddressProviderSimpleLogin, mail.AddressProviderConfig{
-				SLAPIKeys: cfg.SLAPIKeys,
-			})
-			if cleanerErr != nil {
-				slog.Error("初始化 SimpleLogin 清理器失败", slog.Any("err", cleanerErr))
-			} else {
-				simpleLoginCleaner = slCleaner
+			closeSession := func() error {
+				if session == nil {
+					return nil
+				}
+				return session.Close()
 			}
+			return chatgpt.NewProtocol(
+				chatgpt.WithProtocolIMail(mailService),
+				chatgpt.WithProtocolSentinelProvider(chatgpt.NewLazyHybridSentinelProvider(newBrowser)),
+			), closeSession, nil
 		}
+		session, sessionErr := browser.NewSession(false)
+		if sessionErr != nil {
+			return nil, nil, sessionErr
+		}
+		return chatgpt.NewBrowserFlow(mailService, session.Browser()), session.Close, nil
 	}
-	bro, err := browser.NewDefault(false)
-	if err != nil {
-		panic(err)
-	}
-	defer bro.MustClose()
 	sceneMint, err := scenemint.NewClient(cfg.SceneMintURL, cfg.SceneMintAPIKey)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("初始化 SceneMint 失败: %w", err)
 	}
-	worker := toapi.New(mail.From(address, mail.NewSunMail(cfg.SunMailAPIKey)), bro, sceneMint, storeAccounts, simpleLoginCleaner)
+	worker := toapi.New(authenticatorFactory, sceneMint, storeAccounts)
 	if *renew {
 		err = worker.Renew(ctx)
 	} else {
 		err = worker.Start(ctx, *count)
 	}
-	if err != nil && !errors.Is(err, context.Canceled) {
-		panic(err)
-	}
+	return err
 }

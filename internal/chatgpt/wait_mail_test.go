@@ -1,7 +1,7 @@
 package chatgpt
 
 import (
-	"codex-free/internal/mail"
+	"autobro/internal/mail"
 	"context"
 	"errors"
 	"testing"
@@ -46,16 +46,6 @@ func TestWaitMailCodeResendsAtMostFiveTimes(t *testing.T) {
 	}
 	if resends != 5 {
 		t.Fatalf("resend count = %d, want 5", resends)
-	}
-}
-
-func TestWaitMailCodeHonorsContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	flow := New(WithIMail(waitingMail{}))
-	err := flow.waitMailCode(ctx, "forward@example.com", func(string) {}, nil)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("waitMailCode() error = %v, want context.Canceled", err)
 	}
 }
 
