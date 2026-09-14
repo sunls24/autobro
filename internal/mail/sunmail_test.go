@@ -3,6 +3,8 @@ package mail
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -38,10 +40,39 @@ func TestNewSunMailUsesSpecifiedDomain(t *testing.T) {
 	}
 }
 
+func TestSunMailSkipsDomainDiscoveryForSpecifiedDomains(t *testing.T) {
+	called := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called <- struct{}{}
+		http.Error(w, "domain discovery should be skipped", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	provider := NewSunMailWithConfig(SunMailConfig{
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Domains:    []string{" @Example.com "},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	address, err := provider.NewAddress(ctx, "Alice Smith")
+	if err != nil {
+		t.Fatalf("NewAddress() error = %v", err)
+	}
+	if !strings.HasSuffix(address, "@example.com") {
+		t.Fatalf("NewAddress() = %q, want example.com domain", address)
+	}
+	select {
+	case <-called:
+		t.Fatal("domain discovery request was made")
+	default:
+	}
+}
+
 func TestNormalizeSunMailDomainsSkipsEmptyValues(t *testing.T) {
 	t.Parallel()
 
-	domains := normalizeSunMailDomains([]string{"", " @first.example ", "  ", "second.example"})
+	domains := normalizeSunMailDomains([]string{"", " @First.Example ", "first.example", "  ", "SECOND.example"})
 	want := []string{"first.example", "second.example"}
 	if len(domains) != len(want) {
 		t.Fatalf("normalizeSunMailDomains() = %q, want %q", domains, want)
@@ -50,6 +81,37 @@ func TestNormalizeSunMailDomainsSkipsEmptyValues(t *testing.T) {
 		if domains[i] != want[i] {
 			t.Fatalf("normalizeSunMailDomains()[%d] = %q, want %q", i, domains[i], want[i])
 		}
+	}
+}
+
+func TestSunMailUsesConfiguredBaseURLForMailbox(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-API-Key"); got != "sunmail-test-key" {
+			t.Fatalf("X-API-Key = %q, want sunmail-test-key", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/fetch":
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		case "/fetch/message-1":
+			_, _ = w.Write([]byte(`{"data":{"content":"944160"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	sm := newSunMail(SunMailConfig{
+		APIKey:     "sunmail-test-key",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Domains:    []string{"example.com"},
+	})
+	if _, err := sm.fetchMailList(t.Context(), "alice@example.com", 1); err != nil {
+		t.Fatalf("fetchMailList() error = %v", err)
+	}
+	if _, err := sm.fetchMailDetail(t.Context(), "alice@example.com", "message-1"); err != nil {
+		t.Fatalf("fetchMailDetail() error = %v", err)
 	}
 }
 

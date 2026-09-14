@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/sunls24/gox"
-	"github.com/sunls24/gox/network/client"
+	networkclient "github.com/sunls24/gox/network/client"
 	"github.com/sunls24/gox/types"
 	"github.com/tidwall/gjson"
 )
@@ -22,6 +23,17 @@ var _ IMailAddress = (*sunMail)(nil)
 type sunMail struct {
 	domains []string
 	apiKey  string
+	baseURL string
+	client  *networkclient.Client
+}
+
+// SunMailConfig configures the SunMail address and mailbox client.
+type SunMailConfig struct {
+	APIKey     string
+	BaseURL    string
+	HTTPClient *http.Client
+	// Domains are used directly when non-empty; domain discovery is skipped.
+	Domains []string
 }
 
 func (sm *sunMail) ForwardAddress(ctx context.Context, address string) (string, error) {
@@ -35,7 +47,7 @@ func (sm *sunMail) fetchDomain(ctx context.Context) error {
 	const PATH = "/domain"
 	var domains []string
 	_, err := retrySunMail(ctx, "domain", func() ([]byte, error) {
-		body, err := client.Get(ctx, sunMailBaseURL+PATH, sm.apiKeyHeader())
+		body, err := sm.client.Get(ctx, sm.baseURL+PATH, sm.apiKeyHeader())
 		if err != nil {
 			return nil, err
 		}
@@ -76,7 +88,7 @@ func (sm *sunMail) NewAddress(ctx context.Context, name string) (string, error) 
 	return address, nil
 }
 
-var sunMailBaseURL = "https://prod.sunlss.com/api"
+const defaultSunMailBaseURL = "https://prod.sunlss.com/api"
 
 var (
 	sunMailRetryInitialDelay = 2 * time.Second
@@ -120,7 +132,7 @@ func waitContext(ctx context.Context, duration time.Duration) error {
 func (sm *sunMail) fetchMailList(ctx context.Context, address string, start int64) ([]gjson.Result, error) {
 	var list []gjson.Result
 	_, err := retrySunMail(ctx, "fetch", func() ([]byte, error) {
-		body, err := client.Get(ctx, fmt.Sprintf("%s/fetch?to=%s&since=%d", sunMailBaseURL, address, start), sm.apiKeyHeader())
+		body, err := sm.client.Get(ctx, fmt.Sprintf("%s/fetch?to=%s&since=%d", sm.baseURL, address, start), sm.apiKeyHeader())
 		if err != nil {
 			return nil, err
 		}
@@ -136,7 +148,7 @@ func (sm *sunMail) fetchMailList(ctx context.Context, address string, start int6
 
 func (sm *sunMail) fetchMailDetail(ctx context.Context, address, id string) ([]byte, error) {
 	return retrySunMail(ctx, "fetch detail", func() ([]byte, error) {
-		body, err := client.Get(ctx, fmt.Sprintf("%s/fetch/%s?to=%s", sunMailBaseURL, id, address), sm.apiKeyHeader())
+		body, err := sm.client.Get(ctx, fmt.Sprintf("%s/fetch/%s?to=%s", sm.baseURL, id, address), sm.apiKeyHeader())
 		if err != nil {
 			return nil, err
 		}
@@ -212,19 +224,46 @@ func (sm *sunMail) apiKeyHeader() types.Pair[string] {
 }
 
 func NewSunMail(apiKey string, domains ...string) IMail {
+	return NewSunMailWithConfig(SunMailConfig{APIKey: apiKey, Domains: domains})
+}
+
+// NewSunMailWithConfig creates a SunMail client with optional base URL, HTTP
+// client, and preselected domains. Preselected domains are trusted directly
+// and skip domain discovery.
+func NewSunMailWithConfig(config SunMailConfig) IMail {
+	return newSunMail(config)
+}
+
+func newSunMail(config SunMailConfig) *sunMail {
+	httpClient := config.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	baseURL := strings.TrimRight(strings.TrimSpace(config.BaseURL), "/")
+	if baseURL == "" {
+		baseURL = defaultSunMailBaseURL
+	}
 	return &sunMail{
-		apiKey:  apiKey,
-		domains: normalizeSunMailDomains(domains),
+		apiKey:  strings.TrimSpace(config.APIKey),
+		baseURL: baseURL,
+		client:  networkclient.New(networkclient.WithClient(httpClient)),
+		domains: normalizeSunMailDomains(config.Domains),
 	}
 }
 
 func normalizeSunMailDomains(domains []string) []string {
 	result := make([]string, 0, len(domains))
+	seen := make(map[string]struct{}, len(domains))
 	for _, domain := range domains {
-		domain = strings.TrimPrefix(strings.TrimSpace(domain), "@")
-		if domain != "" {
-			result = append(result, domain)
+		domain = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(domain), "@"))
+		if domain == "" {
+			continue
 		}
+		if _, ok := seen[domain]; ok {
+			continue
+		}
+		seen[domain] = struct{}{}
+		result = append(result, domain)
 	}
 	return result
 }
