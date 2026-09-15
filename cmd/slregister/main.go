@@ -40,6 +40,6 @@ func run(envPath string) error {
 		return err
 	}
 
-	logging.Done("SimpleLogin", "本轮完成", slog.String("email", result.Email))
+	logging.Done("SimpleLogin", "本轮", slog.String("email", result.Email))
 	return nil
 }

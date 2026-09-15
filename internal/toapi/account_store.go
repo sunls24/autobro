@@ -22,24 +22,24 @@ func LoadStoredAccounts() ([]chatgpt.Account, error) {
 
 func appendAccount(path string, account *chatgpt.Account) error {
 	if account == nil || strings.TrimSpace(account.Email) == "" {
-		return errors.New("email is required")
+		return errors.New("账号缺少邮箱地址")
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return fmt.Errorf("open accounts file: %w", err)
+		return fmt.Errorf("打开账号文件：%w", err)
 	}
 	defer f.Close()
 	if err = f.Chmod(0o600); err != nil {
-		return fmt.Errorf("set accounts file permissions: %w", err)
+		return fmt.Errorf("设置账号文件权限：%w", err)
 	}
 	if err = repairTail(f); err != nil {
 		return err
 	}
 	if _, err = f.Seek(0, io.SeekEnd); err != nil {
-		return fmt.Errorf("seek accounts file: %w", err)
+		return fmt.Errorf("定位账号文件写入位置：%w", err)
 	}
 	if err = json.NewEncoder(f).Encode(account); err != nil {
-		return fmt.Errorf("write account: %w", err)
+		return fmt.Errorf("写入账号：%w", err)
 	}
 	return nil
 }
@@ -57,7 +57,7 @@ func removeAccount(path, email string) error {
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".accounts-*.jsonl")
 	if err != nil {
-		return fmt.Errorf("create temporary accounts file: %w", err)
+		return fmt.Errorf("创建账号临时文件：%w", err)
 	}
 	tmpPath := f.Name()
 	defer os.Remove(tmpPath)
@@ -73,10 +73,10 @@ func removeAccount(path, email string) error {
 		err = closeErr
 	}
 	if err != nil {
-		return fmt.Errorf("write accounts file: %w", err)
+		return fmt.Errorf("写入账号文件：%w", err)
 	}
 	if err = os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("replace accounts file: %w", err)
+		return fmt.Errorf("替换账号文件：%w", err)
 	}
 	return nil
 }
@@ -84,7 +84,7 @@ func removeAccount(path, email string) error {
 func repairTail(f *os.File) error {
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return fmt.Errorf("read accounts file tail: %w", err)
+		return fmt.Errorf("读取账号文件末尾：%w", err)
 	}
 	trimmed := bytes.TrimRight(data, "\r\n")
 	if len(trimmed) == 0 {
@@ -94,13 +94,13 @@ func repairTail(f *os.File) error {
 	if json.Valid(bytes.TrimSpace(trimmed[lineStart:])) {
 		if len(data) == len(trimmed) {
 			if _, err = f.Write([]byte{'\n'}); err != nil {
-				return fmt.Errorf("complete account record: %w", err)
+				return fmt.Errorf("补全账号记录：%w", err)
 			}
 		}
 		return nil
 	}
 	if err = f.Truncate(int64(lineStart)); err != nil {
-		return fmt.Errorf("discard incomplete account record: %w", err)
+		return fmt.Errorf("丢弃不完整的账号记录：%w", err)
 	}
 	return nil
 }
@@ -111,7 +111,7 @@ func loadAccounts(path string) ([]chatgpt.Account, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read accounts file: %w", err)
+		return nil, fmt.Errorf("读取账号文件：%w", err)
 	}
 
 	latest := make(map[string]chatgpt.Account)
@@ -132,11 +132,11 @@ func loadAccounts(path string) ([]chatgpt.Account, error) {
 			if i == lastRecord {
 				break
 			}
-			return nil, fmt.Errorf("decode account at line %d: %w", i+1, err)
+			return nil, fmt.Errorf("解析第 %d 行账号记录：%w", i+1, err)
 		}
 		email := strings.TrimSpace(account.Email)
 		if email == "" {
-			return nil, fmt.Errorf("account at line %d has no email", i+1)
+			return nil, fmt.Errorf("第 %d 行账号记录缺少邮箱地址", i+1)
 		}
 		if _, ok := latest[email]; !ok {
 			order = append(order, email)

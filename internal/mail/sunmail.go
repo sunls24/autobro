@@ -103,11 +103,11 @@ func retrySunMail(ctx context.Context, operation string, request func() ([]byte,
 			return body, nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, fmt.Errorf("SunMail %s: %w (last error: %v)", operation, ctxErr, err)
+			return nil, fmt.Errorf("SunMail %s：%w（最近一次错误：%v）", operation, ctxErr, err)
 		}
-		logMailWarning("SunMail", "请求重试", slog.String("operation", operation), slog.Int("attempt", attempt), slog.Any("err", err))
+		logMailWarning("SunMail", "请求重试", slog.String("operation", operation), slog.Int("attempt", attempt+1), slog.Any("err", err))
 		if waitErr := waitContext(ctx, delay); waitErr != nil {
-			return nil, fmt.Errorf("SunMail %s: %w (last request error: %v)", operation, waitErr, err)
+			return nil, fmt.Errorf("SunMail %s：%w（最近一次请求错误：%v）", operation, waitErr, err)
 		}
 		if delay < sunMailRetryMaxDelay {
 			delay *= 2

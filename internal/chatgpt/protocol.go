@@ -94,21 +94,16 @@ type ProtocolFlow struct {
 
 	sentinel SentinelProvider
 
-	lastStep string
+	steps stepTracker
 }
 
-// markStep 记录当前步骤用于失败归因，并在详细级别下输出诊断行。args 只随诊断行
-// 输出、不参与 lastStep，因此这些步骤被省略后仍保留失败归因所需的上下文。
+// markStep 记录当前步骤用于失败归因，并在详细级别下输出诊断行。
 func (f *ProtocolFlow) markStep(step string, args ...any) {
-	f.lastStep = step
-	logAuthTrace("协议", step, args...)
+	f.steps.mark(step, args...)
 }
 
 func (f *ProtocolFlow) wrapAuthError(err error) error {
-	if err == nil || f.lastStep == "" {
-		return err
-	}
-	return fmt.Errorf("协议认证步骤“%s”失败：%w", f.lastStep, err)
+	return f.steps.wrap(err)
 }
 
 // SentinelRequest is the dynamic input needed by the authentication Sentinel
@@ -226,6 +221,7 @@ func NewProtocol(options ...ProtocolOption) *ProtocolFlow {
 		clientBuild:      protocolClientBuild,
 		mailCodeInterval: defaultMailCodeInterval,
 		sentinel:         newHTTPSentinelProvider(),
+		steps:            stepTracker{prefix: "协议"},
 	}
 	for _, option := range options {
 		option(f)
@@ -236,13 +232,13 @@ func NewProtocol(options ...ProtocolOption) *ProtocolFlow {
 // RegisterOrLogin executes registration or passwordless existing-account login
 // without creating or attaching a browser.
 func (f *ProtocolFlow) RegisterOrLogin(ctx context.Context, account *Account) (result *Account, err error) {
-	f.lastStep = ""
+	f.steps.reset()
 	defer func() {
 		err = f.wrapAuthError(err)
 	}()
 	if f.m == nil {
 		f.markStep("初始化邮箱服务")
-		return nil, errors.New("mail provider is required")
+		return nil, errors.New("缺少邮箱服务提供方")
 	}
 	if account != nil && strings.TrimSpace(account.Email) != "" {
 		return f.loginExisting(ctx, account)
@@ -255,7 +251,7 @@ func (f *ProtocolFlow) RegisterOrLogin(ctx context.Context, account *Account) (r
 	f.markStep("创建邮箱地址")
 	address, err := f.m.NewAddress(ctx, name)
 	if err != nil {
-		return nil, fmt.Errorf("new mail address: %w", err)
+		return nil, fmt.Errorf("创建邮箱地址：%w", err)
 	}
 	account.Email = address
 	metadata := f.m.Metadata(address)
@@ -282,14 +278,14 @@ func (f *ProtocolFlow) RegisterOrLogin(ctx context.Context, account *Account) (r
 	f.markStep("获取转发地址")
 	account.ForwardMail, err = f.m.ForwardAddress(ctx, account.Email)
 	if err != nil {
-		return nil, fmt.Errorf("forward mail address: %w", err)
+		return nil, fmt.Errorf("获取转发地址：%w", err)
 	}
 	logging.Sub("账号信息", slog.String("email", account.Email), slog.String("address", account.ForwardMail))
 
 	f.markStep("建立协议会话")
 	session, err := f.newProtocolSession()
 	if err != nil {
-		return nil, fmt.Errorf("new protocol session: %w", err)
+		return nil, fmt.Errorf("建立协议会话：%w", err)
 	}
 	f.markStep("进入登录流程")
 	if err = session.bootstrap(ctx, account.Email, protocolScreenHintSignup); err != nil {
@@ -348,13 +344,13 @@ func (f *ProtocolFlow) loginExisting(ctx context.Context, account *Account) (*Ac
 	account.Email = strings.TrimSpace(account.Email)
 	if account.Email == "" {
 		f.markStep("校验账号信息")
-		return nil, errors.New("existing account email is required")
+		return nil, errors.New("已有账号缺少邮箱地址")
 	}
 	if strings.TrimSpace(account.ForwardMail) == "" {
 		f.markStep("获取转发地址")
 		forwardMail, err := f.m.ForwardAddress(ctx, account.Email)
 		if err != nil {
-			return nil, fmt.Errorf("forward existing account mail: %w", err)
+			return nil, fmt.Errorf("获取已有账号转发地址：%w", err)
 		}
 		account.ForwardMail = forwardMail
 	}
@@ -363,7 +359,7 @@ func (f *ProtocolFlow) loginExisting(ctx context.Context, account *Account) (*Ac
 	f.markStep("建立协议会话")
 	session, err := f.newProtocolSession()
 	if err != nil {
-		return nil, fmt.Errorf("new protocol session: %w", err)
+		return nil, fmt.Errorf("建立协议会话：%w", err)
 	}
 	f.markStep("进入登录流程")
 	if err = session.bootstrap(ctx, account.Email, protocolScreenHintLoginOrSignup); err != nil {

@@ -24,18 +24,16 @@ type Flow struct {
 	m   mail.IMail
 	bro *rod.Browser
 
-	lastStep string
+	steps stepTracker
 
 	mailCodeInterval   time.Duration
 	mailCodeTimeout    time.Duration
 	mailCodeTimeoutSet bool
 }
 
-// markStep 记录当前步骤用于失败归因，并在详细级别下输出诊断行。args 只随诊断行
-// 输出、不参与 lastStep，因此这些步骤被省略后仍保留失败归因所需的上下文。
+// markStep 记录当前步骤用于失败归因，并在详细级别下输出诊断行。
 func (f *Flow) markStep(step string, args ...any) {
-	f.lastStep = step
-	logAuthTrace("浏览器", step, args...)
+	f.steps.mark(step, args...)
 }
 
 type Options func(*Flow)
@@ -67,7 +65,7 @@ func WithMailCodeInterval(interval time.Duration) Options {
 }
 
 func New(options ...Options) *Flow {
-	opts := &Flow{mailCodeInterval: defaultMailCodeInterval}
+	opts := &Flow{steps: stepTracker{prefix: "浏览器"}, mailCodeInterval: defaultMailCodeInterval}
 	for _, option := range options {
 		option(opts)
 	}
@@ -355,7 +353,7 @@ var sessionOrigins = []string{
 
 func clearSession(page *rod.Page) (err error) {
 	if err = page.Browser().SetCookies(nil); err != nil {
-		return fmt.Errorf("clear cookies: %w", err)
+		return fmt.Errorf("清理 Cookie：%w", err)
 	}
 
 	for _, origin := range sessionOrigins {
@@ -364,7 +362,7 @@ func clearSession(page *rod.Page) (err error) {
 			StorageTypes: string(proto.StorageStorageTypeAll),
 		}.Call(page)
 		if err != nil {
-			return fmt.Errorf("clear storage for %s: %w", origin, err)
+			return fmt.Errorf("清理 %s 存储数据：%w", origin, err)
 		}
 	}
 

@@ -43,11 +43,12 @@ func New(authenticatorFactory AuthenticatorFactory, sceneMint *scenemint.Client,
 }
 
 func logBatchResult(action string, total, failed int) {
-	args := []any{slog.Int("count", total), slog.Int("failed", failed)}
+	args := []any{slog.Int("count", total)}
 	if failed == 0 {
 		logging.Done(action, "批次", args...)
 		return
 	}
+	args = append(args, slog.Int("failed", failed))
 	logging.Warning(action, "批次未完全成功", args...)
 }
 
@@ -119,7 +120,7 @@ func (w *Worker) Start(ctx context.Context, count int) error {
 func (w *Worker) runWithAuthenticator(fn func(chatgpt.Authenticator) error) (err error) {
 	authenticator, closeSession, err := w.authenticatorFactory()
 	if err != nil {
-		return fmt.Errorf("create authenticator: %w", err)
+		return fmt.Errorf("创建认证会话：%w", err)
 	}
 	defer func() {
 		if closeErr := closeSession(); closeErr != nil {
@@ -215,7 +216,7 @@ func (w *Worker) Renew(ctx context.Context) error {
 		return err
 	}
 	if len(accounts) == 0 {
-		return fmt.Errorf("no local accounts found in %s", accountsFile)
+		return fmt.Errorf("本地账号文件 %s 中没有账号", accountsFile)
 	}
 	logging.Step("续期", "开始", slog.Int("count", len(accounts)))
 	var failures []error
@@ -236,7 +237,7 @@ func (w *Worker) Renew(ctx context.Context) error {
 				return ctxErr
 			}
 			logging.Failure("续期", "查询账号", queryErr, progress()...)
-			failures = append(failures, fmt.Errorf("query SceneMint account %s: %w", account.Email, queryErr))
+			failures = append(failures, fmt.Errorf("查询 SceneMint 账号 %s：%w", account.Email, queryErr))
 			continue
 		}
 		if remote != nil {
@@ -248,8 +249,9 @@ func (w *Worker) Renew(ctx context.Context) error {
 				}
 			case "invalid", "disabled":
 			default:
-				logging.Failure("续期", "未知账号状态", nil, progress(slog.String("status", remote.Status))...)
-				failures = append(failures, fmt.Errorf("unknown SceneMint account status for %s: %s", account.Email, remote.Status))
+				// 不再携带 status 字段：状态值已包含在原因里，避免同一行重复。
+				logging.Failure("续期", "未知账号状态", fmt.Errorf("SceneMint 返回未知状态：%s", remote.Status), progress()...)
+				failures = append(failures, fmt.Errorf("SceneMint 账号 %s 状态未知：%s", account.Email, remote.Status))
 				continue
 			}
 		}
@@ -265,18 +267,18 @@ func (w *Worker) Renew(ctx context.Context) error {
 				if removeErr := removeAccount(accountsFile, account.Email); removeErr != nil {
 					// 写盘失败只影响该账号，与同函数其他失败分支保持一致。
 					logging.Failure("续期", "移除停用账号", removeErr, progress()...)
-					failures = append(failures, fmt.Errorf("remove deactivated account %s: %w", account.Email, removeErr))
+					failures = append(failures, fmt.Errorf("移除停用账号 %s：%w", account.Email, removeErr))
 					continue
 				}
-				logging.Warning("续期", "移除停用账号", progress()...)
+				logging.Skip("续期", "停用账号已移除", progress()...)
 				continue
 			}
 			logging.Failure("续期", "重新登录", err, progress()...)
-			failures = append(failures, fmt.Errorf("renew account %s: %w", account.Email, err))
+			failures = append(failures, fmt.Errorf("续期账号 %s：%w", account.Email, err))
 			continue
 		}
 		if strings.TrimSpace(account.AccessToken) == "" {
-			logging.Failure("续期", "获取访问令牌", errors.New("访问令牌为空"), progress()...)
+			logging.Failure("续期", "访问令牌", errors.New("重新登录后仍为空"), progress()...)
 			failures = append(failures, fmt.Errorf("续期账号 %s：访问令牌为空", account.Email))
 			continue
 		}
@@ -285,7 +287,7 @@ func (w *Worker) Renew(ctx context.Context) error {
 				return ctxErr
 			}
 			logging.Failure("续期", "上传 SceneMint", err, progress()...)
-			failures = append(failures, fmt.Errorf("upload renewed account %s: %w", account.Email, err))
+			failures = append(failures, fmt.Errorf("上传续期账号 %s：%w", account.Email, err))
 			continue
 		}
 		logging.Done("续期", "账号", progress(slog.Duration("duration", time.Since(start)))...)

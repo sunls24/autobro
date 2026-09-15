@@ -52,7 +52,7 @@ func (b *optionalBool) IsBoolFlag() bool {
 
 func main() {
 	logging.Configure(slog.LevelInfo)
-	logging.Step("程序", "启动", slog.String("date", time.Now().Format("2006-01-02")))
+	logging.Step("程序", "启动")
 	if err := run(); err != nil && !errors.Is(err, context.Canceled) {
 		logging.Failure("程序", "运行", err)
 		os.Exit(1)

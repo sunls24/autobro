@@ -30,19 +30,24 @@ func TestFormatStepWithProgress(t *testing.T) {
 		slog.Int("index", 1),
 		slog.Int("total", 10),
 	)
-	want := "12:40:00 注册 1/10 ▶ 开始认证"
+	want := "09-11 12:40:00 注册 1/10 ▶ 开始认证"
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
 	}
 }
 
-func TestFormatStartupCarriesDateOnce(t *testing.T) {
-	got := render("步骤", slog.LevelInfo,
-		slog.String("action", "程序"),
-		slog.String("step", "启动"),
-		slog.String("date", "2026-09-13"),
+// 白名单之外的键必须兜底输出，不能静默丢失（如「可复用」字段）。
+func TestFormatUnknownAttrFallback(t *testing.T) {
+	got := render(eventDebug, slog.LevelDebug,
+		slog.String("action", "邮箱"),
+		slog.String("provider", "SimpleLogin"),
+		slog.String("step", "统计已有别名"),
+		slog.String("address", "owner@example.com"),
+		slog.Int("count", 3),
+		slog.Int("可复用", 2),
+		slog.Int64("aliasId", 42),
 	)
-	want := "12:40:00 程序 ▶ 启动，日期：2026-09-13"
+	want := "09-11 12:40:00 邮箱/SimpleLogin · 统计已有别名，地址：owner@example.com，数量：3，aliasId：42，可复用：2"
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
 	}
@@ -55,7 +60,7 @@ func TestFormatSubStepIsIndentedWithoutAction(t *testing.T) {
 		slog.String("step", "账号信息"),
 		slog.String("address", "forward@example.com"),
 	)
-	want := "12:40:00   · 账号信息，邮箱：test@example.com，地址：forward@example.com"
+	want := "09-11 12:40:00   · 账号信息，邮箱：test@example.com，地址：forward@example.com"
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
 	}
@@ -63,7 +68,7 @@ func TestFormatSubStepIsIndentedWithoutAction(t *testing.T) {
 
 func TestFormatSubDoneHasNoSuffix(t *testing.T) {
 	got := render("子完成", slog.LevelInfo, slog.String("step", "邮箱验证码已校验"))
-	want := "12:40:00   ✓ 邮箱验证码已校验"
+	want := "09-11 12:40:00   ✓ 邮箱验证码已校验"
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
 	}
@@ -76,7 +81,7 @@ func TestFormatBatchSummary(t *testing.T) {
 		slog.Int("count", 3),
 		slog.Int("failed", 0),
 	)
-	want := "12:40:00 注册 ✓ 批次完成，数量：3，失败：0"
+	want := "09-11 12:40:00 注册 ✓ 批次完成，数量：3，失败：0"
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
 	}
@@ -89,7 +94,7 @@ func TestFormatBatchWarningSummary(t *testing.T) {
 		slog.Int("count", 3),
 		slog.Int("failed", 1),
 	)
-	want := "12:40:00 注册 ⚠ 批次未完全成功，数量：3，失败：1"
+	want := "09-11 12:40:00 注册 ⚠ 批次未完全成功，数量：3，失败：1"
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
 	}
@@ -101,7 +106,7 @@ func TestFormatErrorFlattensNewlines(t *testing.T) {
 		slog.String("step", "运行"),
 		slog.String("err", "第一项\n第二项"),
 	)
-	want := "12:40:00 程序 ✗ 运行失败，原因：第一项；第二项"
+	want := "09-11 12:40:00 程序 ✗ 运行失败，原因：第一项；第二项"
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
 	}
@@ -115,7 +120,7 @@ func TestFormatErrorIsFlattenedNotTruncated(t *testing.T) {
 		slog.String("step", "运行"),
 		slog.String("err", value),
 	)
-	want := "12:40:00 程序 ✗ 运行失败，原因：" + value
+	want := "09-11 12:40:00 程序 ✗ 运行失败，原因：" + value
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
 	}
@@ -128,7 +133,7 @@ func TestFormatAttemptCarriesFieldName(t *testing.T) {
 		slog.String("operation", "获取域名"),
 		slog.Int("attempt", 2),
 	)
-	want := "12:40:00 邮箱 ⚠ 请求重试，操作：获取域名，重试：2"
+	want := "09-11 12:40:00 邮箱 ⚠ 请求重试，操作：获取域名，尝试：2"
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
 	}
@@ -144,7 +149,7 @@ func TestFormatDurationIsRounded(t *testing.T) {
 		slog.Int("total", 1),
 		slog.Duration("duration", 26989815084*time.Nanosecond),
 	)
-	want := "12:40:00 注册 1/1 ✓ 账号完成，邮箱：a@b.c，用时：26.99s"
+	want := "09-11 12:40:00 注册 1/1 ✓ 账号完成，邮箱：a@b.c，用时：26.99s"
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
 	}
@@ -158,7 +163,7 @@ func TestFormatTruncatesAndFlattensBody(t *testing.T) {
 		slog.String("step", "创建别名"),
 		slog.String("body", body),
 	)
-	want := "12:40:00 邮箱 · 创建别名，响应：" + strings.Repeat("a", maxValueLen) + "…"
+	want := "09-11 12:40:00 邮箱 · 创建别名，响应：" + strings.Repeat("a", maxValueLen) + "…"
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
 	}
@@ -175,7 +180,7 @@ func TestFormatVerboseTraceCarriesStepFields(t *testing.T) {
 		slog.String("step", "页面跳转"),
 		slog.String("url", "https://auth.openai.com/log-in/password"),
 	)
-	want := "12:40:00 认证/浏览器 · 页面跳转，页面：https://auth.openai.com/log-in/password"
+	want := "09-11 12:40:00 认证/浏览器 · 页面跳转，页面：https://auth.openai.com/log-in/password"
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
 	}

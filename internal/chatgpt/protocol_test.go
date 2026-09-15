@@ -28,7 +28,7 @@ type protocolTestMail struct {
 }
 
 func TestProtocolAuthErrorIncludesLastStep(t *testing.T) {
-	flow := &ProtocolFlow{lastStep: "等待邮箱验证码"}
+	flow := &ProtocolFlow{steps: stepTracker{prefix: "协议", last: "等待邮箱验证码"}}
 	err := flow.wrapAuthError(errors.New("连接失败"))
 	if got, want := err.Error(), "协议认证步骤“等待邮箱验证码”失败：连接失败"; got != want {
 		t.Fatalf("wrapAuthError() = %q, want %q", got, want)

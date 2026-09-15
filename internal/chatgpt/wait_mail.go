@@ -43,7 +43,7 @@ func waitForMailCode(ctx context.Context, m mail.IMail, forwardMail string, wait
 	var lastResendErr error
 	timeoutError := func() error {
 		if lastResendErr != nil {
-			return fmt.Errorf("%w (last resend error: %v)", ErrMailCodeTimeout, lastResendErr)
+			return fmt.Errorf("%w（最近一次重发错误：%v）", ErrMailCodeTimeout, lastResendErr)
 		}
 		return ErrMailCodeTimeout
 	}
@@ -51,14 +51,14 @@ func waitForMailCode(ctx context.Context, m mail.IMail, forwardMail string, wait
 		select {
 		case code, ok := <-ch:
 			if !ok {
-				return "", errors.New("wait mail code: channel closed")
+				return "", errors.New("等待邮箱验证码：通道已关闭")
 			}
 			if code.Err != nil {
-				return "", fmt.Errorf("wait mail code: %w", code.Err)
+				return "", fmt.Errorf("等待邮箱验证码：%w", code.Err)
 			}
 			value := strings.TrimSpace(code.Value)
 			if value == "" {
-				return "", errors.New("wait mail code: empty code")
+				return "", errors.New("等待邮箱验证码：验证码为空")
 			}
 			return value, nil
 		case <-timer.C:

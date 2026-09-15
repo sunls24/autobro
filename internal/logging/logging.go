@@ -6,13 +6,14 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	timeFormat = "15:04:05"
+	timeFormat = "01-02 15:04:05"
 	// subIndent 让二级步骤在视觉上归属到上方的一级节点。
 	subIndent = "  "
 	// maxValueLen 限制单行内字段的长度，避免响应体把日志撑成巨行。
@@ -274,11 +275,9 @@ func formatMessage(style eventStyle, step string) string {
 }
 
 // formatDetails 仅按字段名渲染，不感知业务文案：新增或重命名步骤不会改变输出格式。
+// 白名单之外的键由 formatUnknownAttrs 兜底输出，不会静默丢失。
 func formatDetails(values map[string]slog.Value) string {
 	details := make([]string, 0, 8)
-	if value := stringValue(values["date"]); value != "" {
-		details = append(details, "，日期："+value)
-	}
 	if value := stringValue(values["email"]); value != "" {
 		details = append(details, "，邮箱："+value)
 	}
@@ -300,8 +299,15 @@ func formatDetails(values map[string]slog.Value) string {
 	if value := stringValue(values["operation"]); value != "" {
 		details = append(details, "，操作："+value)
 	}
+	if value := stringValue(values["name"]); value != "" {
+		details = append(details, "，名称："+value)
+	}
+	if value := stringValue(values["domain"]); value != "" {
+		details = append(details, "，域名："+value)
+	}
+	// 尝试字段统一表示「即将执行第 N 次尝试」。
 	if value := intValue(values["attempt"]); value != "" {
-		details = append(details, "，重试："+value)
+		details = append(details, "，尝试："+value)
 	}
 	if value := intValue(values["count"]); value != "" {
 		details = append(details, "，数量："+value)
@@ -318,7 +324,45 @@ func formatDetails(values map[string]slog.Value) string {
 	if value := stringValue(values["body"]); value != "" {
 		details = append(details, "，响应："+singleLineLimited(value))
 	}
+	details = append(details, formatUnknownAttrs(values)...)
 	return strings.Join(details, "")
+}
+
+// consumedKeys 已由 formatMessage 或 actionLabel 消费的字段，不参与细节渲染。
+var consumedKeys = map[string]bool{
+	"action":   true,
+	"step":     true,
+	"mode":     true,
+	"provider": true,
+	"index":    true,
+	"total":    true,
+}
+
+// knownDetailKeys formatDetails 白名单内的键，兜底渲染时据此排除。
+// 与 formatDetails 的 if 链保持一致，新增白名单字段时两处同步。
+var knownDetailKeys = map[string]bool{
+	"email": true, "address": true, "url": true, "birthday": true,
+	"duration": true, "status": true, "operation": true, "name": true,
+	"domain": true, "attempt": true, "count": true, "failed": true,
+	"mailboxId": true, "err": true, "body": true,
+}
+
+// formatUnknownAttrs 兜底渲染白名单之外的字段，键名排序保证输出稳定，
+// 避免调用方新增字段时因漏改上方样式表而静默丢失。
+func formatUnknownAttrs(values map[string]slog.Value) []string {
+	unknown := make([]string, 0, len(values))
+	for key := range values {
+		if knownDetailKeys[key] || consumedKeys[key] {
+			continue
+		}
+		unknown = append(unknown, key)
+	}
+	sort.Strings(unknown)
+	details := make([]string, 0, len(unknown))
+	for _, key := range unknown {
+		details = append(details, "，"+key+"："+stringValue(values[key]))
+	}
+	return details
 }
 
 // singleLine 把字段压成单行，保证「一行一条」的格式不被破坏。

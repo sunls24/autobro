@@ -3,7 +3,6 @@ package chatgpt
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"autobro/internal/mail"
 
@@ -27,20 +26,17 @@ func NewBrowserFlow(m mail.IMail, bro *rod.Browser) *BrowserFlow {
 
 func (f *BrowserFlow) RegisterOrLogin(ctx context.Context, account *Account) (*Account, error) {
 	if f == nil || f.flow == nil {
-		return nil, errors.New("browser flow is not initialized")
+		return nil, errors.New("浏览器流程未初始化")
 	}
 	if f.flow.bro == nil {
-		return nil, errors.New("browser is not initialized")
+		return nil, errors.New("浏览器未初始化")
 	}
-	f.flow.lastStep = ""
+	f.flow.steps.reset()
 	var result *Account
 	if err := rod.Try(func() {
 		result = f.flow.MustRegisterOrLogin(ctx, account)
 	}); err != nil {
-		if f.flow.lastStep != "" {
-			return nil, fmt.Errorf("浏览器认证步骤“%s”失败：%w", f.flow.lastStep, err)
-		}
-		return nil, err
+		return nil, f.flow.steps.wrap(err)
 	}
 	return result, nil
 }

@@ -86,7 +86,7 @@ func (sl *simpleLogin) auth() types.Pair[string] {
 
 func (sl *simpleLogin) NewAddress(ctx context.Context, name string) (string, error) {
 	if len(sl.accounts) == 0 {
-		return "", errors.New("SL: no account available")
+		return "", errors.New("SL：无可用账号")
 	}
 	if err := sl.ensureAliasCounts(ctx); err != nil {
 		return "", err
@@ -106,7 +106,7 @@ func (sl *simpleLogin) NewAddress(ctx context.Context, name string) (string, err
 			sl.nextAccount()
 		}
 	}
-	return "", fmt.Errorf("SL: all accounts reached the %d-alias limit", simpleLoginMaxAliases)
+	return "", fmt.Errorf("SL：所有账号均达到 %d 个别名上限", simpleLoginMaxAliases)
 }
 
 func (sl *simpleLogin) ensureAliasCounts(ctx context.Context) error {
@@ -122,12 +122,12 @@ func (sl *simpleLogin) ensureAliasCounts(ctx context.Context) error {
 		for pageID := 0; ; pageID++ {
 			aliases, err := sl.listAliases(ctx, accountIndex, pageID)
 			if err != nil {
-				return fmt.Errorf("SL: list aliases for %s: %w", account.forward, err)
+				return fmt.Errorf("SL：拉取 %s 的别名列表：%w", account.forward, err)
 			}
 			count += len(aliases)
 			for _, alias := range aliases {
 				if alias.ID <= 0 || strings.TrimSpace(alias.Email) == "" {
-					return fmt.Errorf("SL: invalid alias for %s", account.forward)
+					return fmt.Errorf("SL：%s 返回的别名数据异常", account.forward)
 				}
 				if strings.TrimSpace(alias.Note) != simpleLoginRegistrationNote {
 					reusableAliases[accountIndex] = append(reusableAliases[accountIndex], aliasCandidate{
@@ -158,7 +158,7 @@ func (sl *simpleLogin) reuseAlias(ctx context.Context, accountIndex int) (string
 	}
 	candidate := sl.reusableAliases[accountIndex][0]
 	if err := sl.markAliasUsed(ctx, candidate.record); err != nil {
-		return "", false, fmt.Errorf("SL: mark alias %s: %w", candidate.email, err)
+		return "", false, fmt.Errorf("SL：标记别名 %s：%w", candidate.email, err)
 	}
 	sl.reusableAliases[accountIndex] = sl.reusableAliases[accountIndex][1:]
 	sl.trackAlias(candidate.email, candidate.record)
@@ -172,7 +172,7 @@ func (sl *simpleLogin) createAddress(ctx context.Context, name string) (string, 
 		return "", err
 	}
 	if len(options) == 0 {
-		return "", errors.New("SL: no alias suffix available")
+		return "", errors.New("SL：无可用别名后缀")
 	}
 	return sl.aliasCustomNew(ctx, address, options[rand.IntN(len(options))].signedSuffix)
 }
@@ -205,7 +205,7 @@ func (sl *simpleLogin) decrementAliasCount(accountIndex int) {
 
 func (sl *simpleLogin) DelAddressByMetadata(ctx context.Context, metadata AddressMetadata) error {
 	if metadata.Provider != "" && !strings.EqualFold(strings.TrimSpace(metadata.Provider), AddressProviderSimpleLogin) {
-		return fmt.Errorf("SL: unsupported metadata provider %q", metadata.Provider)
+		return fmt.Errorf("SL：不支持的元数据提供方 %q", metadata.Provider)
 	}
 	record, tracked := sl.aliases[normalizeAddress(metadata.Email)]
 	if tracked {
@@ -219,7 +219,7 @@ func (sl *simpleLogin) DelAddressByMetadata(ctx context.Context, metadata Addres
 		}
 	} else {
 		if metadata.AddressID <= 0 || metadata.OwnerID <= 0 {
-			return fmt.Errorf("SL: incomplete alias metadata for %s", metadata.Email)
+			return fmt.Errorf("SL：%s 的别名元数据不完整", metadata.Email)
 		}
 		accountIndex := -1
 		for i, account := range sl.accounts {
@@ -229,7 +229,7 @@ func (sl *simpleLogin) DelAddressByMetadata(ctx context.Context, metadata Addres
 			}
 		}
 		if accountIndex < 0 {
-			return fmt.Errorf("SL: mailbox owner not found: %d", metadata.OwnerID)
+			return fmt.Errorf("SL：未找到邮箱归属者 %d", metadata.OwnerID)
 		}
 		record = aliasRecord{id: metadata.AddressID, accountIndex: accountIndex, created: true}
 	}
@@ -243,7 +243,7 @@ func (sl *simpleLogin) DelAddressByMetadata(ctx context.Context, metadata Addres
 
 func (sl *simpleLogin) deleteAlias(ctx context.Context, record aliasRecord) error {
 	if record.id <= 0 || record.accountIndex < 0 || record.accountIndex >= len(sl.accounts) {
-		return errors.New("SL: invalid alias record")
+		return errors.New("SL：别名记录无效")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, fmt.Sprintf("%s/aliases/%d", simpleAPIBase, record.id), nil)
 	if err != nil {
@@ -270,7 +270,7 @@ func (sl *simpleLogin) releaseAlias(ctx context.Context, record aliasRecord) err
 
 func (sl *simpleLogin) setAliasNote(ctx context.Context, record aliasRecord, note string) error {
 	if record.id <= 0 || record.accountIndex < 0 || record.accountIndex >= len(sl.accounts) {
-		return errors.New("SL: invalid alias record")
+		return errors.New("SL：别名记录无效")
 	}
 	body, err := json.Marshal(map[string]string{"note": note})
 	if err != nil {
@@ -310,10 +310,10 @@ func (sl *simpleLogin) ForgetAddress(address string) {
 func (sl *simpleLogin) ForwardAddress(ctx context.Context, address string) (string, error) {
 	record, ok := sl.aliases[normalizeAddress(address)]
 	if !ok {
-		return "", fmt.Errorf("SL: alias not found: %s", address)
+		return "", fmt.Errorf("SL：未找到别名 %s", address)
 	}
 	if record.accountIndex < 0 || record.accountIndex >= len(sl.accounts) {
-		return "", fmt.Errorf("SL: invalid alias owner for %s", address)
+		return "", fmt.Errorf("SL：%s 的别名归属者无效", address)
 	}
 	return sl.accounts[record.accountIndex].forward, nil
 }
@@ -341,7 +341,7 @@ func (sl *simpleLogin) trackAlias(address string, record aliasRecord) {
 
 func (sl *simpleLogin) listAliases(ctx context.Context, accountIndex, pageID int) ([]simpleLoginAlias, error) {
 	if accountIndex < 0 || accountIndex >= len(sl.accounts) {
-		return nil, fmt.Errorf("SL: invalid account index: %d", accountIndex)
+		return nil, fmt.Errorf("SL：无效的账号序号 %d", accountIndex)
 	}
 	endpoint, err := url.Parse(simpleAPIBase + "/v2/aliases")
 	if err != nil {
@@ -356,7 +356,7 @@ func (sl *simpleLogin) listAliases(ctx context.Context, accountIndex, pageID int
 	}
 	var response simpleLoginAliasesResponse
 	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, fmt.Errorf("SL: decode aliases: %w", err)
+		return nil, fmt.Errorf("SL：解码别名列表：%w", err)
 	}
 	return response.Aliases, nil
 }
@@ -373,8 +373,11 @@ func (sl *simpleLogin) aliasOptions(ctx context.Context) ([]suffix, error) {
 	if err != nil {
 		return nil, err
 	}
-	logMailDebug("SimpleLogin", "获取别名选项", slog.String("body", string(body)))
 	suffixes := gjson.GetBytes(body, "suffixes").Array()
+	if len(suffixes) == 0 {
+		// 解析结果为空时输出原始响应便于定位接口变更；正常路径不刷响应体。
+		logMailDebug("SimpleLogin", "别名选项响应异常", slog.String("body", string(body)))
+	}
 	return gox.Map(suffixes, func(r gjson.Result) suffix {
 		return suffix{signedSuffix: r.Get("signed_suffix").String()}
 	}), nil
@@ -391,12 +394,13 @@ func (sl *simpleLogin) aliasCustomNew(ctx context.Context, custom string, signed
 	if err != nil {
 		return "", err
 	}
-	logMailDebug("SimpleLogin", "创建别名", slog.String("body", string(body)))
 	email := gjson.GetBytes(body, "email").String()
 	aliasID := gjson.GetBytes(body, "id").Int()
 	if email == "" || aliasID == 0 {
-		return "", errors.New("SL: invalid alias response")
+		logMailDebug("SimpleLogin", "创建别名响应异常", slog.String("body", string(body)))
+		return "", errors.New("SL：创建别名响应异常")
 	}
+	logMailDebug("SimpleLogin", "别名已创建", slog.String("address", email), slog.Int64("aliasId", aliasID))
 	record := aliasRecord{id: aliasID, accountIndex: sl.currentIndex, created: true}
 	sl.trackAlias(email, record)
 	sl.incrementAliasCount(sl.currentIndex)
@@ -413,7 +417,7 @@ func NewSimpleLogin(ctx context.Context, apiKeys []string) (IMailAddress, error)
 			logMailFailure("SimpleLogin", "获取邮箱列表", err)
 			continue
 		}
-		logMailDebug("SimpleLogin", "获取邮箱列表", slog.String("body", string(body)))
+		added := false
 		for _, box := range gjson.GetBytes(body, "mailboxes").Array() {
 			verified := box.Get("verified").Bool()
 			if !verified {
@@ -427,11 +431,16 @@ func NewSimpleLogin(ctx context.Context, apiKeys []string) (IMailAddress, error)
 				apiKey:    apiKey,
 				forward:   email,
 			})
+			added = true
 			break
+		}
+		if !added {
+			// 响应里没有已验证邮箱时输出原始响应，便于定位接口变更或 Key 失效。
+			logMailDebug("SimpleLogin", "邮箱列表无已验证账号", slog.String("body", string(body)))
 		}
 	}
 	if len(accounts) == 0 {
-		return nil, errors.New("SL: no valid account found")
+		return nil, errors.New("SL：未找到有效的邮箱账号")
 	}
 	return &simpleLogin{
 		accounts: accounts,

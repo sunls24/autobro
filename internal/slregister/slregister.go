@@ -105,13 +105,13 @@ func Register(ctx context.Context, options Options) (Result, error) {
 	}, "", nil); err != nil {
 		return Result{}, fmt.Errorf("SimpleLogin 注册请求失败：%w", err)
 	}
-	logging.Done("SimpleLogin", "注册邮件已发送")
+	logging.Done("SimpleLogin", "注册请求")
 
 	code, err := receiveCode(ctx, codeCh)
 	if err != nil {
 		return Result{}, fmt.Errorf("获取 SimpleLogin 验证码失败：%w", err)
 	}
-	logging.Done("SimpleLogin", "已收到验证邮件")
+	logging.Done("SimpleLogin", "收取验证邮件")
 
 	if err := sl.postJSON(ctx, "/auth/activate", map[string]string{
 		"email": address,
@@ -119,7 +119,7 @@ func Register(ctx context.Context, options Options) (Result, error) {
 	}, "", nil); err != nil {
 		return Result{}, fmt.Errorf("SimpleLogin 激活账号失败：%w", err)
 	}
-	logging.Done("SimpleLogin", "账号已激活")
+	logging.Done("SimpleLogin", "账号激活")
 
 	device := strings.TrimSpace(options.Device)
 	if device == "" {
@@ -144,7 +144,7 @@ func Register(ctx context.Context, options Options) (Result, error) {
 	if err := PrependAPIKey(options.EnvPath, apiKey); err != nil {
 		return Result{}, fmt.Errorf("更新 %s 失败：%w", options.EnvPath, err)
 	}
-	logging.Done("SimpleLogin", "API Key 已写入环境文件", loggingFields(name, address, registrationSunMailDomain)...)
+	logging.Done("SimpleLogin", "写入 API Key", loggingFields(name, address, registrationSunMailDomain)...)
 
 	return Result{Email: address}, nil
 }
