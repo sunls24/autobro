@@ -60,6 +60,7 @@ const (
 	simpleLoginAliasesPageSize  = 20
 	simpleLoginMaxAliases       = 4
 	simpleLoginRegistrationNote = "autobro:chatgpt:v1"
+	simpleLoginReusableNote     = "autobro:chatgpt:reusable"
 )
 
 func (sl *simpleLogin) nextAccount() {
@@ -209,7 +210,11 @@ func (sl *simpleLogin) DelAddressByMetadata(ctx context.Context, metadata Addres
 	record, tracked := sl.aliases[normalizeAddress(metadata.Email)]
 	if tracked {
 		if !record.created {
+			if err := sl.releaseAlias(ctx, record); err != nil {
+				return err
+			}
 			sl.removeAlias(record, metadata.Email)
+			sl.requeueAlias(record, metadata.Email)
 			return nil
 		}
 	} else {
@@ -249,10 +254,25 @@ func (sl *simpleLogin) deleteAlias(ctx context.Context, record aliasRecord) erro
 }
 
 func (sl *simpleLogin) markAliasUsed(ctx context.Context, record aliasRecord) error {
+	return sl.setAliasNote(ctx, record, simpleLoginRegistrationNote)
+}
+
+func (sl *simpleLogin) releaseAlias(ctx context.Context, record aliasRecord) error {
+	err := sl.setAliasNote(ctx, record, simpleLoginReusableNote)
+	if err == nil || ctx.Err() != nil {
+		return err
+	}
+	if retryErr := sl.setAliasNote(ctx, record, simpleLoginReusableNote); retryErr != nil {
+		return errors.Join(err, retryErr)
+	}
+	return nil
+}
+
+func (sl *simpleLogin) setAliasNote(ctx context.Context, record aliasRecord, note string) error {
 	if record.id <= 0 || record.accountIndex < 0 || record.accountIndex >= len(sl.accounts) {
 		return errors.New("SL: invalid alias record")
 	}
-	body, err := json.Marshal(map[string]string{"note": simpleLoginRegistrationNote})
+	body, err := json.Marshal(map[string]string{"note": note})
 	if err != nil {
 		return err
 	}
@@ -262,6 +282,13 @@ func (sl *simpleLogin) markAliasUsed(ctx context.Context, record aliasRecord) er
 	}
 	_, err = client.Do(req, header.New().ContentTypeJSON().Add(types.NewPair("Authentication", sl.accounts[record.accountIndex].apiKey)).Get()...)
 	return err
+}
+
+func (sl *simpleLogin) requeueAlias(record aliasRecord, address string) {
+	sl.reusableAliases[record.accountIndex] = append(
+		[]aliasCandidate{{email: address, record: record}},
+		sl.reusableAliases[record.accountIndex]...,
+	)
 }
 
 func (sl *simpleLogin) removeAlias(record aliasRecord, address string) {

@@ -10,21 +10,30 @@ type Authenticator interface {
 	RegisterOrLogin(context.Context, *Account) (*Account, error)
 }
 
+type AuthStage uint8
+
+const (
+	AuthStageBeforeAccount AuthStage = iota
+	AuthStageAccountCreated
+	AuthStageTokenReady
+)
+
 type Account struct {
-	Email             string `json:"email"`
-	Password          string `json:"password,omitempty"`
-	ForwardMail       string `json:"forward_mail"`
-	MailProvider      string `json:"mail_provider,omitempty"`
-	ProviderAddressID int64  `json:"provider_address_id,omitempty"`
-	ProviderOwnerID   int64  `json:"provider_owner_id,omitempty"`
-	AccessToken       string `json:"-"`
+	Email             string    `json:"email"`
+	Password          string    `json:"password,omitempty"`
+	ForwardMail       string    `json:"forward_mail"`
+	MailProvider      string    `json:"mail_provider,omitempty"`
+	ProviderAddressID int64     `json:"provider_address_id,omitempty"`
+	ProviderOwnerID   int64     `json:"provider_owner_id,omitempty"`
+	AccessToken       string    `json:"-"`
+	AuthStage         AuthStage `json:"-"`
 }
 
 var ErrAccountDeactivated = errors.New("account deactivated")
 var ErrMailCodeTimeout = errors.New("mail code timeout")
 
 const (
-	timeout                 = 2 * time.Second
+	timeout                 = 10 * time.Second
 	defaultMailCodeInterval = 30 * time.Second
 	maxMailCodeResends      = 5
 

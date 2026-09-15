@@ -248,7 +248,9 @@ func (f *ProtocolFlow) RegisterOrLogin(ctx context.Context, account *Account) (r
 		return f.loginExisting(ctx, account)
 	}
 
-	account = &Account{}
+	if account == nil {
+		account = &Account{}
+	}
 	name := mail.GenerateName()
 	f.markStep("创建邮箱地址")
 	address, err := f.m.NewAddress(ctx, name)
@@ -258,10 +260,13 @@ func (f *ProtocolFlow) RegisterOrLogin(ctx context.Context, account *Account) (r
 	account.Email = address
 	metadata := f.m.Metadata(address)
 	metadata.Email = address
-	// cleanupAddress 为 true 时，本次新建的邮箱地址在失败后需要删除。
-	cleanupAddress := true
+	// 已创建或已停用的账号保留别名；只有创建前失败才释放地址。
 	defer func() {
-		if !cleanupAddress {
+		if errors.Is(err, ErrAccountDeactivated) {
+			f.m.ForgetAddress(account.Email)
+			return
+		}
+		if account.AuthStage >= AuthStageAccountCreated {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -322,6 +327,7 @@ func (f *ProtocolFlow) RegisterOrLogin(ctx context.Context, account *Account) (r
 		return nil, err
 	}
 	logging.SubDone("账号已创建")
+	account.AuthStage = AuthStageAccountCreated
 	f.markStep("处理登录回调")
 	if err = session.followCallback(ctx, callbackURL); err != nil {
 		return nil, err
@@ -331,9 +337,9 @@ func (f *ProtocolFlow) RegisterOrLogin(ctx context.Context, account *Account) (r
 	if err != nil {
 		return nil, err
 	}
+	account.AuthStage = AuthStageTokenReady
 	logging.SubDone("访问令牌已获取")
 
-	cleanupAddress = false
 	f.m.ForgetAddress(account.Email)
 	return account, nil
 }
@@ -396,7 +402,9 @@ func (f *ProtocolFlow) loginExisting(ctx context.Context, account *Account) (*Ac
 	if err != nil {
 		return nil, err
 	}
+	account.AuthStage = AuthStageTokenReady
 	logging.SubDone("访问令牌已获取")
+	f.m.ForgetAddress(account.Email)
 	return account, nil
 }
 

@@ -127,7 +127,7 @@ func TestSimpleLoginCountsAliasesAndRotatesAfterFour(t *testing.T) {
 
 func TestSimpleLoginReusesUnmarkedAliasAndDoesNotDeleteIt(t *testing.T) {
 	var gotPatchAuth string
-	var gotPatchNote string
+	var gotPatchNotes []string
 	deleteCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -145,7 +145,7 @@ func TestSimpleLoginReusesUnmarkedAliasAndDoesNotDeleteIt(t *testing.T) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			gotPatchNote = payload.Note
+			gotPatchNotes = append(gotPatchNotes, payload.Note)
 			_, _ = w.Write([]byte(`{"note":"autobro:chatgpt:v1"}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/aliases/7":
 			deleteCalled = true
@@ -176,8 +176,8 @@ func TestSimpleLoginReusesUnmarkedAliasAndDoesNotDeleteIt(t *testing.T) {
 	if gotPatchAuth != "first-key" {
 		t.Fatalf("patch Authentication = %q, want first-key", gotPatchAuth)
 	}
-	if gotPatchNote != simpleLoginRegistrationNote {
-		t.Fatalf("patch note = %q, want %q", gotPatchNote, simpleLoginRegistrationNote)
+	if len(gotPatchNotes) != 1 || gotPatchNotes[0] != simpleLoginRegistrationNote {
+		t.Fatalf("patch notes = %v, want [%q]", gotPatchNotes, simpleLoginRegistrationNote)
 	}
 	metadata := sl.Metadata(address)
 	if metadata.AddressID != 7 || metadata.OwnerID != 11 {
@@ -186,11 +186,65 @@ func TestSimpleLoginReusesUnmarkedAliasAndDoesNotDeleteIt(t *testing.T) {
 	if err := sl.DelAddressByMetadata(context.Background(), metadata); err != nil {
 		t.Fatalf("DelAddressByMetadata() error = %v", err)
 	}
+	if len(gotPatchNotes) != 2 || gotPatchNotes[1] != simpleLoginReusableNote {
+		t.Fatalf("patch notes after release = %v, want [%q %q]", gotPatchNotes, simpleLoginRegistrationNote, simpleLoginReusableNote)
+	}
+	address, err = sl.NewAddress(context.Background(), "ignored")
+	if err != nil {
+		t.Fatalf("NewAddress() after release error = %v", err)
+	}
+	if address != "existing@example.com" {
+		t.Fatalf("NewAddress() after release = %q, want existing@example.com", address)
+	}
+	if len(gotPatchNotes) != 3 || gotPatchNotes[2] != simpleLoginRegistrationNote {
+		t.Fatalf("patch notes after reuse = %v, want final registration note", gotPatchNotes)
+	}
+	// 停用账号与成功账号一样保留已使用标记，不再分配其别名。
+	sl.ForgetAddress(address)
+	if next, err := sl.NewAddress(context.Background(), "ignored"); err == nil {
+		t.Fatalf("NewAddress() after forgetting used alias = %q, want capacity error", next)
+	}
+	if len(gotPatchNotes) != 3 {
+		t.Fatalf("used alias note was changed: %v", gotPatchNotes)
+	}
 	if deleteCalled {
 		t.Fatal("reused alias was deleted")
 	}
 	if got, want := sl.aliasCounts, []int{4}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("aliasCounts = %v, want %v", got, want)
+	}
+}
+
+func TestSimpleLoginReleaseAliasRetriesOnce(t *testing.T) {
+	patchCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/aliases/7" {
+			http.NotFound(w, r)
+			return
+		}
+		patchCalls++
+		if patchCalls == 1 {
+			http.Error(w, "temporary failure", http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	oldBase := simpleAPIBase
+	simpleAPIBase = server.URL
+	defer func() { simpleAPIBase = oldBase }()
+
+	sl := &simpleLogin{
+		accounts: []account{{mailboxId: 11, apiKey: "first-key"}},
+		aliases:  map[string]aliasRecord{"existing@example.com": {id: 7, accountIndex: 0}},
+	}
+
+	if err := sl.releaseAlias(context.Background(), aliasRecord{id: 7, accountIndex: 0}); err != nil {
+		t.Fatalf("releaseAlias() error = %v", err)
+	}
+	if patchCalls != 2 {
+		t.Fatalf("patch calls = %d, want 2", patchCalls)
 	}
 }
 

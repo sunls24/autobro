@@ -5,6 +5,7 @@ import (
 	"autobro/internal/logging"
 	"autobro/internal/mail"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -90,13 +91,17 @@ func clickLogin(page *rod.Page) {
 }
 
 func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
+	if a == nil {
+		a = &Account{}
+	}
 	// name 用于注册新账号：既作为邮箱地址的本地部分，也填入资料页。
 	name := mail.GenerateName()
-	// cleanupAddress 为 true 时，本次新建的邮箱地址在失败后需要删除。
-	cleanupAddress := false
+	// addressAcquired 为 true 时，本次流程负责的别名在账号创建前失败时需要释放。
+	// 账号创建成功后别名已经提交，不再自动删除。
+	addressAcquired := false
 	var addressMetadata mail.AddressMetadata
 	defer func() {
-		if !cleanupAddress {
+		if !addressAcquired || a.AuthStage >= AuthStageAccountCreated {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -105,8 +110,7 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 			logAuthFailure("浏览器", "清理邮箱地址", cleanupErr, slog.String("email", addressMetadata.Email))
 		}
 	}()
-	if a == nil || a.Email == "" {
-		a = &Account{}
+	if strings.TrimSpace(a.Email) == "" {
 		f.markStep("创建邮箱地址")
 		address, err := f.m.NewAddress(ctx, name)
 		if err != nil {
@@ -115,7 +119,7 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 		a.Email = address
 		addressMetadata = f.m.Metadata(address)
 		addressMetadata.Email = address
-		cleanupAddress = true
+		addressAcquired = true
 		a.MailProvider = addressMetadata.Provider
 		a.ProviderAddressID = addressMetadata.AddressID
 		a.ProviderOwnerID = addressMetadata.OwnerID
@@ -211,7 +215,15 @@ inputEmail:
 		f.markStep("校验邮箱验证码")
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
 			page.Timeout(timeout).MustElement(`button[name="intent"][value="validate"]`).MustClick()
-		}, checkAccountDeactivated)
+		}, func(page *rod.Page) error {
+			err := checkAccountDeactivated(page)
+			if errors.Is(err, ErrAccountDeactivated) {
+				// 保留已使用标记，避免停用账号的别名被释放后再次分配。
+				f.m.ForgetAddress(a.Email)
+				addressAcquired = false
+			}
+			return err
+		})
 		logging.SubDone("邮箱验证码已校验")
 	default:
 		if strings.Contains(nowURL, "/auth/login_with") {
@@ -257,6 +269,9 @@ inputEmail:
 	}
 	switch nowURL {
 	case passkeyURL:
+		// 到达 Passkey 页面说明账号创建请求已经完成；后续跳过 Passkey
+		// 失败时也必须保留当前账号和邮箱别名，下一次改走登录流程。
+		a.AuthStage = AuthStageAccountCreated
 		f.markStep("跳过 Passkey")
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
 			page.Timeout(timeout).MustElement(`[data-dd-action-name="skip create account enroll passkey"]`).MustClick()
@@ -266,6 +281,9 @@ inputEmail:
 		unexpectedURL(nowURL)
 	}
 	logging.SubDone("账号已创建")
+	if a.AuthStage < AuthStageAccountCreated {
+		a.AuthStage = AuthStageAccountCreated
+	}
 
 	f.markStep("获取访问令牌")
 	a.AccessToken = gjson.Get(page.MustEval(`async () => {
@@ -275,11 +293,9 @@ inputEmail:
 	if strings.TrimSpace(a.AccessToken) == "" {
 		panic("访问令牌为空")
 	}
+	a.AuthStage = AuthStageTokenReady
 	logging.SubDone("访问令牌已获取")
-	if cleanupAddress {
-		cleanupAddress = false
-		f.m.ForgetAddress(a.Email)
-	}
+	f.m.ForgetAddress(a.Email)
 	return a
 }
 

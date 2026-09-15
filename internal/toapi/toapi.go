@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"time"
 
@@ -21,6 +22,16 @@ type Worker struct {
 	authenticatorFactory AuthenticatorFactory
 	sceneMint            *scenemint.Client
 	storeAccounts        bool
+}
+
+const maxRegistrationAttempts = 3
+
+var registrationRetryWait = waitRegistrationRetry
+
+type registrationState struct {
+	account *chatgpt.Account
+	stored  bool
+	started time.Time
 }
 
 func New(authenticatorFactory AuthenticatorFactory, sceneMint *scenemint.Client, storeAccounts bool) *Worker {
@@ -48,17 +59,57 @@ func (w *Worker) Start(ctx context.Context, count int) error {
 			return err
 		}
 		index, total := i+1, count
-		logging.Step("注册", "开始认证", slog.Int("index", index), slog.Int("total", total))
-		if err := w.runWithAuthenticator(func(authenticator chatgpt.Authenticator) error {
-			return w.registerOne(ctx, authenticator, index, total)
-		}); err != nil {
+		state := &registrationState{
+			account: &chatgpt.Account{},
+			started: time.Now(),
+		}
+		var err error
+		for attempt := 1; attempt <= maxRegistrationAttempts; attempt++ {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
+				return errors.Join(ctxErr, err)
 			}
-			// 账号级失败：具体环节由原因文本给出（认证步骤、保存账号或上传 SceneMint），
-			// 避免把非认证失败也标成“认证失败”。
-			logging.Failure("注册", "账号", err, slog.Int("index", index), slog.Int("total", total))
-			failures = append(failures, fmt.Errorf("注册 %d/%d：%w", index, total, err))
+
+			if state.account.AuthStage == chatgpt.AuthStageTokenReady && state.account.AccessToken != "" {
+				logging.Step("注册", "处理账号", slog.Int("index", index), slog.Int("total", total), slog.Int("attempt", attempt))
+				err = w.finishRegistration(ctx, state, index, total)
+			} else {
+				logging.Step("注册", "开始认证", slog.Int("index", index), slog.Int("total", total), slog.Int("attempt", attempt))
+				err = w.runWithAuthenticator(func(authenticator chatgpt.Authenticator) error {
+					return w.authenticateOne(ctx, authenticator, state.account)
+				})
+				if err == nil {
+					err = w.finishRegistration(ctx, state, index, total)
+				} else if state.account.AuthStage >= chatgpt.AuthStageAccountCreated && !errors.Is(err, chatgpt.ErrAccountDeactivated) {
+					// 认证尚未完成也保存已创建的账号，最终失败或取消后可通过续期恢复。
+					err = errors.Join(err, w.storeRegistration(state))
+				}
+			}
+			if err == nil {
+				break
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return errors.Join(ctxErr, err)
+			}
+			if attempt == maxRegistrationAttempts || !retryableRegistrationError(state.account, err) {
+				// 账号级失败：具体环节由原因文本给出（认证步骤、保存账号或上传 SceneMint），
+				// 避免把非认证失败也标成“认证失败”。
+				logging.Failure("注册", "账号", err, slog.Int("index", index), slog.Int("total", total))
+				failures = append(failures, fmt.Errorf("注册 %d/%d：%w", index, total, err))
+				break
+			}
+			if state.account.AuthStage < chatgpt.AuthStageAccountCreated {
+				// 账号尚未创建，当前邮箱清理已由认证流程负责；下一次按新账号流程开始。
+				*state.account = chatgpt.Account{}
+			}
+			logging.Warning("注册", "账号重试",
+				slog.Int("index", index),
+				slog.Int("total", total),
+				slog.Int("attempt", attempt+1),
+				slog.Any("err", err),
+			)
+			if waitErr := registrationRetryWait(ctx, attempt); waitErr != nil {
+				return errors.Join(waitErr, err)
+			}
 		}
 	}
 	logBatchResult("注册", count, len(failures))
@@ -78,33 +129,84 @@ func (w *Worker) runWithAuthenticator(fn func(chatgpt.Authenticator) error) (err
 	return fn(authenticator)
 }
 
-// registerOne 完成单个账号的认证与上传。成功与失败都只由调用方汇总成一行，
-// 中间步骤不再单独打印，避免同一邮箱在连续多行里反复出现。
-func (w *Worker) registerOne(ctx context.Context, authenticator chatgpt.Authenticator, index, total int) error {
-	start := time.Now()
+func (w *Worker) authenticateOne(ctx context.Context, authenticator chatgpt.Authenticator, account *chatgpt.Account) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	a, err := authenticator.RegisterOrLogin(ctx, nil)
+	a, err := authenticator.RegisterOrLogin(ctx, account)
 	if err != nil {
-		// 认证错误本身已带失败步骤，直接返回可避免日志出现「认证失败：认证失败」。
 		return err
 	}
-	if w.storeAccounts {
-		if err := appendAccount(accountsFile, a); err != nil {
+	if a == nil {
+		return errors.New("认证未返回账号")
+	}
+	if a != account {
+		*account = *a
+	}
+	if strings.TrimSpace(account.AccessToken) == "" {
+		return errors.New("认证未返回访问令牌")
+	}
+	account.AuthStage = chatgpt.AuthStageTokenReady
+	return nil
+}
+
+func (w *Worker) storeRegistration(state *registrationState) error {
+	if w.storeAccounts && !state.stored {
+		if err := appendAccount(accountsFile, state.account); err != nil {
 			return fmt.Errorf("保存本地账号失败：%w", err)
 		}
+		state.stored = true
 	}
-	if err := w.sceneMint.Upload(ctx, a.AccessToken); err != nil {
+	return nil
+}
+
+func (w *Worker) finishRegistration(ctx context.Context, state *registrationState, index, total int) error {
+	finishCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	if err := w.storeRegistration(state); err != nil {
+		return err
+	}
+	if err := w.sceneMint.Upload(finishCtx, state.account.AccessToken); err != nil {
 		return fmt.Errorf("上传 SceneMint 失败：%w", err)
 	}
 	logging.Done("注册", "账号",
-		slog.String("email", a.Email),
+		slog.String("email", state.account.Email),
 		slog.Int("index", index),
 		slog.Int("total", total),
-		slog.Duration("duration", time.Since(start)),
+		slog.Duration("duration", time.Since(state.started)),
 	)
 	return nil
+}
+
+func retryableRegistrationError(account *chatgpt.Account, err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, chatgpt.ErrAccountDeactivated) || errors.Is(err, chatgpt.ErrMailCodeTimeout) {
+		return false
+	}
+	if account != nil && account.AuthStage >= chatgpt.AuthStageAccountCreated {
+		return true
+	}
+	return isTimeoutError(err)
+}
+
+func isTimeoutError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func waitRegistrationRetry(ctx context.Context, attempt int) error {
+	delay := 10 * time.Second * time.Duration(1<<(attempt-1))
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (w *Worker) Renew(ctx context.Context) error {
