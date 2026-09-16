@@ -88,7 +88,7 @@ func (sm *sunMail) NewAddress(ctx context.Context, name string) (string, error) 
 	return address, nil
 }
 
-const defaultSunMailBaseURL = "https://prod.sunlss.com/api"
+const defaultSunMailBaseURL = "https://mail.sunls.de/api"
 
 var (
 	sunMailRetryInitialDelay = 2 * time.Second

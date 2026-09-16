@@ -10,6 +10,7 @@ const (
 	AddressProviderSimpleLogin = "sl"
 	AddressProviderSunMail     = "sun"
 	AddressProviderManyMe      = "mm"
+	AddressProviderUumail      = "uu"
 )
 
 type AddressProviderConfig struct {
@@ -18,6 +19,7 @@ type AddressProviderConfig struct {
 	SunMailDomains       []string
 	ManyMeUsername       string
 	ManyMeForwardAddress string
+	UumailAccounts       []string
 }
 
 func NewAddressProvider(ctx context.Context, provider string, cfg AddressProviderConfig) (IMailAddress, error) {
@@ -28,13 +30,19 @@ func NewAddressProvider(ctx context.Context, provider string, cfg AddressProvide
 		return NewSunMail(cfg.SunMailAPIKey, cfg.SunMailDomains...), nil
 	case AddressProviderManyMe:
 		return NewManyMe(cfg.ManyMeUsername, cfg.ManyMeForwardAddress)
+	case AddressProviderUumail:
+		return NewUumailWithConfig(ctx, UumailConfig{
+			Accounts:      cfg.UumailAccounts,
+			SunMailAPIKey: cfg.SunMailAPIKey,
+		})
 	default:
 		return nil, fmt.Errorf(
-			"unsupported mail address provider %q, use %q, %q or %q",
+			"unsupported mail address provider %q, use %q, %q, %q or %q",
 			provider,
 			AddressProviderSimpleLogin,
 			AddressProviderSunMail,
 			AddressProviderManyMe,
+			AddressProviderUumail,
 		)
 	}
 }

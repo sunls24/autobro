@@ -7,6 +7,7 @@ type Config struct {
 	SunMailAPIKey        string   `env:"SUNMAIL_API_KEY,required,notEmpty"`
 	ManyMeUsername       string   `env:"MANYME_USERNAME"`
 	ManyMeForwardAddress string   `env:"MANYME_FORWARD_ADDRESS"`
+	UumailAccounts       []string `env:"UUMAIL_ACCOUNTS" envSeparator:","`
 	SceneMintURL         string   `env:"SCENEMINT_URL,required,notEmpty"`
 	SceneMintAPIKey      string   `env:"SCENEMINT_API_KEY,required,notEmpty"`
 }

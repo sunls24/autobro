@@ -106,6 +106,8 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 		defer cancel()
 		if cleanupErr := f.m.DelAddressByMetadata(cleanupCtx, addressMetadata); cleanupErr != nil {
 			logAuthFailure("浏览器", "清理邮箱地址", cleanupErr, slog.String("email", addressMetadata.Email))
+		} else {
+			logging.Sub("邮箱别名已清理", slog.String("email", addressMetadata.Email))
 		}
 	}()
 	if strings.TrimSpace(a.Email) == "" {
@@ -115,6 +117,7 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 			panic(err)
 		}
 		a.Email = address
+		logging.Sub("邮箱别名已创建", slog.String("email", address))
 		addressMetadata = f.m.Metadata(address)
 		addressMetadata.Email = address
 		addressAcquired = true

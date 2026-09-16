@@ -68,7 +68,7 @@ func run() (err error) {
 	cfg := toapi.MustNew()
 	count := flag.Int("c", 10, "注册数量")
 	protocolMode := flag.Bool("p", false, "使用协议混合认证；默认使用浏览器")
-	mailProvider := flag.String("m", mail.AddressProviderSunMail, "邮箱地址实现: sun, sl 或 mm")
+	mailProvider := flag.String("m", mail.AddressProviderSunMail, "邮箱地址实现: sun, sl, mm 或 uu")
 	sunMailDomains := flag.String("d", "", "SunMail 域名后缀，多个用逗号分隔")
 	renew := flag.Bool("r", false, "更新需要重新登录的账号")
 	saveAccounts := &optionalBool{}
@@ -79,7 +79,7 @@ func run() (err error) {
 		logging.Configure(slog.LevelDebug)
 	}
 	provider := mail.NormalizeAddressProvider(*mailProvider)
-	storeAccounts := provider == mail.AddressProviderSimpleLogin
+	storeAccounts := provider == mail.AddressProviderSimpleLogin || provider == mail.AddressProviderUumail
 	if saveAccounts.set {
 		storeAccounts = saveAccounts.value
 	}
@@ -97,6 +97,7 @@ func run() (err error) {
 		SunMailDomains:       domains,
 		ManyMeUsername:       cfg.ManyMeUsername,
 		ManyMeForwardAddress: cfg.ManyMeForwardAddress,
+		UumailAccounts:       cfg.UumailAccounts,
 	})
 	if err != nil {
 		return fmt.Errorf("初始化邮箱服务失败: %w", err)

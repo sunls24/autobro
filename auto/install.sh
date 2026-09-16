@@ -62,7 +62,7 @@ cat > "$tmp_plist" <<EOF
     </array>
 
     <key>StartInterval</key>
-    <integer>21600</integer>
+    <integer>43200</integer>
 </dict>
 </plist>
 EOF
@@ -74,4 +74,4 @@ EOF
 print "已安装 $LABEL"
 print "脚本：$AUTOSL_PATH"
 print "日志：$AUTO_DIR/logs"
-print "周期：每 21600 秒（6 小时）"
+print "周期：每 43200 秒（12 小时）"

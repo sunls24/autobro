@@ -37,3 +37,17 @@ func TestNewAddressProviderUnsupportedIncludesManyMe(t *testing.T) {
 		t.Fatalf("NewAddressProvider() error = %q, want %q", err, AddressProviderManyMe)
 	}
 }
+
+func TestNewAddressProviderUumailRequiresAccounts(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewAddressProvider(context.Background(), AddressProviderUumail, AddressProviderConfig{
+		SunMailAPIKey: "test-sunmail-key",
+	})
+	if err == nil {
+		t.Fatal("NewAddressProvider() error = nil, want UUMAIL_ACCOUNTS error")
+	}
+	if !strings.Contains(err.Error(), "UUMAIL_ACCOUNTS") {
+		t.Fatalf("NewAddressProvider() error = %q, want UUMAIL_ACCOUNTS", err)
+	}
+}

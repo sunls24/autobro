@@ -4,3 +4,6 @@ mise.toml
 accounts.jsonl
 /bin/
 /auto/logs/
+uumail_sessions.json
+uumail_sessions.json.lock
+.uumail-sessions-*.tmp

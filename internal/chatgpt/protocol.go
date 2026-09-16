@@ -254,6 +254,7 @@ func (f *ProtocolFlow) RegisterOrLogin(ctx context.Context, account *Account) (r
 		return nil, fmt.Errorf("创建邮箱地址：%w", err)
 	}
 	account.Email = address
+	logging.Sub("邮箱别名已创建", slog.String("email", address))
 	metadata := f.m.Metadata(address)
 	metadata.Email = address
 	// 已创建或已停用的账号保留别名；只有创建前失败才释放地址。
@@ -269,6 +270,8 @@ func (f *ProtocolFlow) RegisterOrLogin(ctx context.Context, account *Account) (r
 		defer cancel()
 		if cleanupErr := f.m.DelAddressByMetadata(cleanupCtx, metadata); cleanupErr != nil {
 			logAuthFailure("协议", "清理邮箱地址", cleanupErr, slog.String("email", metadata.Email))
+		} else {
+			logging.Sub("邮箱别名已清理", slog.String("email", metadata.Email))
 		}
 	}()
 	account.MailProvider = metadata.Provider
