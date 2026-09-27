@@ -102,7 +102,10 @@ func run() (err error) {
 	if err != nil {
 		return fmt.Errorf("初始化邮箱服务失败: %w", err)
 	}
-	mailService := mail.From(address, mail.NewSunMail(cfg.SunMailAPIKey))
+	mailService := mail.From(address, mail.NewSunMailWithConfig(mail.SunMailConfig{
+		APIKey:       cfg.SunMailAPIKey,
+		FailFastWait: *renew,
+	}))
 	authenticatorFactory := func() (chatgpt.Authenticator, func() error, error) {
 		if *protocolMode {
 			var session *browser.Session

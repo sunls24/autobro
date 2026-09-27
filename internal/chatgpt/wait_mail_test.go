@@ -4,6 +4,8 @@ import (
 	"autobro/internal/mail"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -32,6 +34,23 @@ func TestWaitMailCodeTimeout(t *testing.T) {
 	err := flow.waitMailCode(context.Background(), "forward@example.com", func(string) {}, nil)
 	if !errors.Is(err, ErrMailCodeTimeout) {
 		t.Fatalf("waitMailCode() error = %v, want ErrMailCodeTimeout", err)
+	}
+}
+
+func TestWaitMailCodeSunMailFailureIsNotTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "mail unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	sunMail := mail.NewSunMailWithConfig(mail.SunMailConfig{
+		BaseURL:      server.URL,
+		HTTPClient:   server.Client(),
+		FailFastWait: true,
+	})
+	flow := New(WithIMail(mail.From(sunMail, sunMail)), WithMailCodeTimeout(2*time.Second))
+	err := flow.waitMailCode(context.Background(), "forward@example.com", func(string) {}, nil)
+	if err == nil || errors.Is(err, ErrMailCodeTimeout) {
+		t.Fatalf("waitMailCode() error = %v, want SunMail failure", err)
 	}
 }
 

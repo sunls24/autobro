@@ -21,10 +21,11 @@ var _ IMailWait = (*sunMail)(nil)
 var _ IMailAddress = (*sunMail)(nil)
 
 type sunMail struct {
-	domains []string
-	apiKey  string
-	baseURL string
-	client  *networkclient.Client
+	domains      []string
+	apiKey       string
+	baseURL      string
+	client       *networkclient.Client
+	failFastWait bool
 }
 
 // SunMailConfig configures the SunMail address and mailbox client.
@@ -32,6 +33,8 @@ type SunMailConfig struct {
 	APIKey     string
 	BaseURL    string
 	HTTPClient *http.Client
+	// FailFastWait returns mailbox request errors immediately instead of retrying.
+	FailFastWait bool
 	// Domains are used directly when non-empty; domain discovery is skipped.
 	Domains []string
 }
@@ -88,7 +91,7 @@ func (sm *sunMail) NewAddress(ctx context.Context, name string) (string, error) 
 	return address, nil
 }
 
-const defaultSunMailBaseURL = "https://mail.sunls.de/api"
+const defaultSunMailBaseURL = "https://mail.sunlss.com/api"
 
 var (
 	sunMailRetryInitialDelay = 2 * time.Second
@@ -131,7 +134,7 @@ func waitContext(ctx context.Context, duration time.Duration) error {
 
 func (sm *sunMail) fetchMailList(ctx context.Context, address string, start int64) ([]gjson.Result, error) {
 	var list []gjson.Result
-	_, err := retrySunMail(ctx, "fetch", func() ([]byte, error) {
+	_, err := sm.fetchForWait(ctx, "fetch", func(ctx context.Context) ([]byte, error) {
 		body, err := sm.client.Get(ctx, fmt.Sprintf("%s/fetch?to=%s&since=%d", sm.baseURL, address, start), sm.apiKeyHeader())
 		if err != nil {
 			return nil, err
@@ -147,7 +150,7 @@ func (sm *sunMail) fetchMailList(ctx context.Context, address string, start int6
 }
 
 func (sm *sunMail) fetchMailDetail(ctx context.Context, address, id string) ([]byte, error) {
-	return retrySunMail(ctx, "fetch detail", func() ([]byte, error) {
+	return sm.fetchForWait(ctx, "fetch detail", func(ctx context.Context) ([]byte, error) {
 		body, err := sm.client.Get(ctx, fmt.Sprintf("%s/fetch/%s?to=%s", sm.baseURL, id, address), sm.apiKeyHeader())
 		if err != nil {
 			return nil, err
@@ -157,6 +160,15 @@ func (sm *sunMail) fetchMailDetail(ctx context.Context, address, id string) ([]b
 		}
 		return body, nil
 	})
+}
+
+func (sm *sunMail) fetchForWait(ctx context.Context, operation string, request func(context.Context) ([]byte, error)) ([]byte, error) {
+	if sm.failFastWait {
+		requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		return request(requestCtx)
+	}
+	return retrySunMail(ctx, operation, func() ([]byte, error) { return request(ctx) })
 }
 
 func (sm *sunMail) waitMailCode(ctx context.Context, address string) (string, error) {
@@ -244,10 +256,11 @@ func newSunMail(config SunMailConfig) *sunMail {
 		baseURL = defaultSunMailBaseURL
 	}
 	return &sunMail{
-		apiKey:  strings.TrimSpace(config.APIKey),
-		baseURL: baseURL,
-		client:  networkclient.New(networkclient.WithClient(httpClient)),
-		domains: normalizeSunMailDomains(config.Domains),
+		apiKey:       strings.TrimSpace(config.APIKey),
+		baseURL:      baseURL,
+		client:       networkclient.New(networkclient.WithClient(httpClient)),
+		domains:      normalizeSunMailDomains(config.Domains),
+		failFastWait: config.FailFastWait,
 	}
 }
 

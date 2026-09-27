@@ -263,14 +263,21 @@ func (w *Worker) Renew(ctx context.Context) error {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
-			if errors.Is(err, chatgpt.ErrAccountDeactivated) {
+			removeReason := ""
+			switch {
+			case errors.Is(err, chatgpt.ErrAccountDeactivated):
+				removeReason = "停用账号"
+			case errors.Is(err, chatgpt.ErrMailCodeTimeout):
+				removeReason = "验证码超时账号"
+			}
+			if removeReason != "" {
 				if removeErr := removeAccount(accountsFile, account.Email); removeErr != nil {
 					// 写盘失败只影响该账号，与同函数其他失败分支保持一致。
-					logging.Failure("续期", "移除停用账号", removeErr, progress()...)
-					failures = append(failures, fmt.Errorf("移除停用账号 %s：%w", account.Email, removeErr))
+					logging.Failure("续期", "移除"+removeReason, removeErr, progress()...)
+					failures = append(failures, fmt.Errorf("移除%s %s：%w", removeReason, account.Email, removeErr))
 					continue
 				}
-				logging.Skip("续期", "停用账号已移除", progress()...)
+				logging.Skip("续期", removeReason+"已移除", progress()...)
 				continue
 			}
 			logging.Failure("续期", "重新登录", err, progress()...)
