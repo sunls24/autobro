@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,12 +14,19 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sunls24/gox"
 )
 
 type fakeWait struct {
 	code string
+}
+
+type uumailRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f uumailRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func (f *fakeWait) WaitMailCode(ctx context.Context, address string) <-chan gox.Result[string] {
@@ -451,5 +459,69 @@ func TestUumailErrorBodyTruncated(t *testing.T) {
 	}
 	if len(err.Error()) > 300 {
 		t.Fatalf("错误文本未截断（长度 %d）：%s...", len(err.Error()), err.Error()[:100])
+	}
+}
+
+func TestUumailUserInfoRetriesUnexpectedEOF(t *testing.T) {
+	t.Parallel()
+	attempts := 0
+	client := NewUumailClient("https://api.example", "", &http.Client{
+		Transport: uumailRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts++
+			if attempts < 3 {
+				return nil, io.ErrUnexpectedEOF
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"result":{"name":"a1","domain":"uu.me"}}`)),
+			}, nil
+		}),
+	})
+	info, err := client.UserInfo(context.Background(), "uumail_ut=token")
+	if err != nil {
+		t.Fatalf("UserInfo() error = %v", err)
+	}
+	if attempts != 3 || info.Username != "a1" {
+		t.Fatalf("UserInfo() = %+v, attempts = %d; want a1 after 3 attempts", info, attempts)
+	}
+}
+
+func TestUumailUserInfoStopsAfterRetryLimit(t *testing.T) {
+	t.Parallel()
+	attempts := 0
+	client := NewUumailClient("https://api.example", "https://sso.example", &http.Client{
+		Transport: uumailRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts++
+			return nil, io.ErrUnexpectedEOF
+		}),
+	})
+
+	_, err := client.UserInfo(context.Background(), "uumail_ut=token")
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("UserInfo() error = %v, want unexpected EOF", err)
+	}
+	if attempts != uumailUserInfoAttempts {
+		t.Fatalf("UserInfo() attempts = %d, want %d", attempts, uumailUserInfoAttempts)
+	}
+}
+
+func TestUumailUserInfoHonorsContextWhileWaiting(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attempts := 0
+	client := NewUumailClient("https://api.example", "", &http.Client{
+		Transport: uumailRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts++
+			time.AfterFunc(10*time.Millisecond, cancel)
+			return nil, io.ErrUnexpectedEOF
+		}),
+	})
+	_, err := client.UserInfo(ctx, "uumail_ut=token")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("UserInfo() error = %v, want context canceled", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("UserInfo() attempts = %d, want 1", attempts)
 	}
 }

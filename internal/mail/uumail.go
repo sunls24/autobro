@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,6 +31,8 @@ const (
 	uumailUserAgent          = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 	uumailSendCodeRetryWait  = 65 * time.Second
 	uumailLoginTimeout       = 5 * time.Minute
+	uumailRequestTimeout     = 30 * time.Second
+	uumailUserInfoAttempts   = 3
 	uumailAliasMaxRetries    = 3
 )
 
@@ -72,7 +75,7 @@ type UumailClient struct {
 
 func NewUumailClient(apiBase, ssoBase string, httpClient *http.Client) *UumailClient {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: uumailRequestTimeout}
 	}
 	return &UumailClient{
 		apiBase: strings.TrimRight(defaultOr(apiBase, defaultUumailAPIBase), "/"),
@@ -289,11 +292,29 @@ func waitUumailCode(ctx context.Context, codeCh <-chan gox.Result[string]) (stri
 	}
 }
 
-// UserInfo 查询账号资料与配额；会话失效时返回 ErrUumailSessionExpired。
+// UserInfo 查询账号资料与配额；临时断连或超时最多尝试三次，会话失效立即返回。
 func (c *UumailClient) UserInfo(ctx context.Context, cookie string) (UumailUserInfo, error) {
-	parsed, err := c.do(ctx, http.MethodGet, c.apiBase+"/v1/user/info", nil, cookie)
-	if err != nil {
-		return UumailUserInfo{}, err
+	var parsed map[string]any
+	for attempt := 1; ; attempt++ {
+		var err error
+		parsed, err = c.do(ctx, http.MethodGet, c.apiBase+"/v1/user/info", nil, cookie)
+		if err == nil {
+			break
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return UumailUserInfo{}, fmt.Errorf("Uumail：查询用户信息：%w（最近一次请求错误：%v）", ctxErr, err)
+		}
+		var netErr net.Error
+		retryable := errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+			(errors.As(err, &netErr) && netErr.Timeout())
+		if attempt == uumailUserInfoAttempts || !retryable {
+			return UumailUserInfo{}, fmt.Errorf("Uumail：查询用户信息：%w", err)
+		}
+		logMailWarning("Uumail", "请求重试", slog.String("operation", "查询用户信息"),
+			slog.Int("attempt", attempt+1), slog.Any("err", err))
+		if waitErr := waitContext(ctx, time.Duration(attempt)*time.Second); waitErr != nil {
+			return UumailUserInfo{}, fmt.Errorf("Uumail：查询用户信息：%w（最近一次请求错误：%v）", waitErr, err)
+		}
 	}
 	result, _ := parsed["result"].(map[string]any)
 	info := UumailUserInfo{

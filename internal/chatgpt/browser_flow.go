@@ -3,6 +3,8 @@ package chatgpt
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 
 	"autobro/internal/mail"
 
@@ -36,7 +38,10 @@ func (f *BrowserFlow) RegisterOrLogin(ctx context.Context, account *Account) (*A
 	if err := rod.Try(func() {
 		result = f.flow.MustRegisterOrLogin(ctx, account)
 	}); err != nil {
-		return nil, f.flow.steps.wrap(err)
+		tryErr := err.(*rod.TryError)
+		stack := strings.NewReplacer("\r\n", "；", "\n", "；", "\r", "；").Replace(tryErr.Stack)
+		logAuthTrace("浏览器", "认证错误堆栈", slog.String("stack", stack))
+		return nil, f.flow.steps.wrap(tryErr.Unwrap())
 	}
 	return result, nil
 }
