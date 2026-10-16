@@ -217,7 +217,7 @@ inputEmail:
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
 			page.Timeout(timeout).MustElement(`button[name="intent"][value="validate"]`).MustClick()
 		}, func(page *rod.Page) error {
-			err := checkAccountDeactivated(page)
+			err := checkAccountDeactivated(page.Context(ctx).Timeout(timeout))
 			if errors.Is(err, ErrAccountDeactivated) {
 				// 保留已使用标记，避免停用账号的别名被释放后再次分配。
 				f.m.ForgetAddress(a.Email)
@@ -301,12 +301,12 @@ inputEmail:
 }
 
 func checkAccountDeactivated(page *rod.Page) error {
-	body, err := page.Element("body")
+	// 诊断错误码位于只读 textarea 的 value 中，不包含在 body.innerText 中。
+	deactivated, _, err := page.HasR("body, textarea", "account_deactivated")
 	if err != nil {
-		return nil
+		return fmt.Errorf("读取认证页内容：%w", err)
 	}
-	text, err := body.Text()
-	if err == nil && strings.Contains(text, "account_deactivated") {
+	if deactivated {
 		return ErrAccountDeactivated
 	}
 	return nil
