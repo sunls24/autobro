@@ -190,7 +190,7 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 
 inputEmail:
 	f.markStep("页面跳转", slog.String("url", nowURL))
-	switch nowURL {
+	switch withoutURLQuery(nowURL) {
 	case passwordURL:
 		f.markStep("输入密码")
 		if a.Password == "" {
@@ -200,7 +200,7 @@ inputEmail:
 		nowURL = browser.MustWaitURLChange(ctx, page, func() {
 			page.Timeout(timeout).MustElement(`button[data-dd-action-name="Continue"]`).MustClick()
 		})
-		if nowURL != emailURL {
+		if withoutURLQuery(nowURL) != emailURL {
 			break
 		}
 		fallthrough
@@ -370,6 +370,12 @@ func clearSession(page *rod.Page) (err error) {
 	}
 
 	return nil
+}
+
+// 页面识别忽略查询参数，实际导航和错误日志仍保留完整 URL。
+func withoutURLQuery(raw string) string {
+	address, _, _ := strings.Cut(raw, "?")
+	return address
 }
 
 func unexpectedURL(url string) {

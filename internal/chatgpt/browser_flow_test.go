@@ -32,3 +32,22 @@ func TestBrowserFlowReportsOriginalError(t *testing.T) {
 		t.Fatalf("RegisterOrLogin() includes panic diagnostics: %v", err)
 	}
 }
+
+func TestEmailVerificationURLWithQuery(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		url  string
+		want bool
+	}{
+		{emailURL, true},
+		{emailURL + "?auth_page=test", true},
+		{"https://example.com/email-verification?auth_page=test", false},
+		{emailURL + "/other?auth_page=test", false},
+	} {
+		t.Run(tt.url, func(t *testing.T) {
+			if got := withoutURLQuery(tt.url) == emailURL; got != tt.want {
+				t.Fatalf("email verification page match = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
