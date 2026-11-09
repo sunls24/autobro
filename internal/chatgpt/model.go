@@ -33,7 +33,7 @@ var ErrAccountDeactivated = errors.New("account deactivated")
 var ErrMailCodeTimeout = errors.New("mail code timeout")
 
 const (
-	timeout                 = 10 * time.Second
+	timeout                 = 20 * time.Second
 	defaultMailCodeInterval = 30 * time.Second
 	maxMailCodeResends      = 5
 

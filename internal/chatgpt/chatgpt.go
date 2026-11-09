@@ -207,9 +207,9 @@ inputEmail:
 	case emailURL:
 		f.markStep("等待邮箱验证码")
 		if err = f.waitMailCode(ctx, forwardMail, func(code string) {
-			page.MustElement(`input[inputmode="numeric"]`).MustInput(code)
+			page.Context(ctx).Timeout(timeout).MustElement(`input[inputmode="numeric"]`).MustInput(code)
 		}, func() {
-			page.MustElement(`button[name="intent"][value="resend"]`).MustClick()
+			page.Context(ctx).Timeout(timeout).MustElement(`button[name="intent"][value="resend"]`).MustClick()
 		}); err != nil {
 			panic(err)
 		}

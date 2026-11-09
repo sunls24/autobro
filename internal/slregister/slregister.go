@@ -56,7 +56,7 @@ type loginResponse struct {
 }
 
 // Register creates and activates one SimpleLogin account, obtains its login
-// API key, and prepends that key to envPath. It does not delete aliases or
+// API key, and replaces SL_API_KEY in envPath. It does not delete aliases or
 // accounts.
 func Register(ctx context.Context, options Options) (Result, error) {
 	if strings.TrimSpace(options.SunMailAPIKey) == "" {
@@ -141,7 +141,7 @@ func Register(ctx context.Context, options Options) (Result, error) {
 		return Result{}, errors.New("SimpleLogin 登录未返回 API Key")
 	}
 
-	if err := PrependAPIKey(options.EnvPath, apiKey); err != nil {
+	if err := SetAPIKey(options.EnvPath, apiKey); err != nil {
 		return Result{}, fmt.Errorf("更新 %s 失败：%w", options.EnvPath, err)
 	}
 	logging.Done("SimpleLogin", "写入 API Key", loggingFields(name, address, registrationSunMailDomain)...)
@@ -293,9 +293,8 @@ func checkEnvWritable(envPath string) error {
 	return os.Remove(tempPath)
 }
 
-// PrependAPIKey prepends apiKey to SL_API_KEY in envPath. Existing keys are
-// preserved and a key already present in the file is not duplicated.
-func PrependAPIKey(envPath, apiKey string) error {
+// SetAPIKey replaces SL_API_KEY in envPath with the new account key.
+func SetAPIKey(envPath, apiKey string) error {
 	apiKey = strings.TrimSpace(apiKey)
 	if apiKey == "" || strings.ContainsAny(apiKey, ",\r\n") {
 		return errors.New("invalid SimpleLogin API Key")
@@ -343,7 +342,6 @@ func PrependAPIKey(envPath, apiKey string) error {
 func updateEnvContent(content, apiKey string) string {
 	lines := strings.SplitAfter(content, "\n")
 	matched := -1
-	var matchedValues []string
 	var matchedPrefix string
 	var matchedEnding string
 	for index, line := range lines {
@@ -359,15 +357,12 @@ func updateEnvContent(content, apiKey string) string {
 		if !strings.HasPrefix(trimmed, "SL_API_KEY=") {
 			continue
 		}
-		existing := parseCSVEnvValue(strings.TrimPrefix(trimmed, "SL_API_KEY="))
 		matched = index
-		matchedValues = existing
 		matchedPrefix = leading + exportPrefix + "SL_API_KEY="
 		matchedEnding = ending
 	}
 	if matched >= 0 {
-		values := prependUnique(matchedValues, apiKey)
-		lines[matched] = matchedPrefix + strings.Join(values, ",") + matchedEnding
+		lines[matched] = matchedPrefix + apiKey + matchedEnding
 		return strings.Join(lines, "")
 	}
 
@@ -387,31 +382,4 @@ func splitLineEnding(line string) (string, string) {
 		return strings.TrimSuffix(line, "\n"), "\n"
 	}
 	return line, ""
-}
-
-func parseCSVEnvValue(value string) []string {
-	value = strings.TrimSpace(value)
-	if len(value) >= 2 {
-		if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
-			value = value[1 : len(value)-1]
-		}
-	}
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts)+1)
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			result = append(result, part)
-		}
-	}
-	return result
-}
-
-func prependUnique(existing []string, value string) []string {
-	for _, item := range existing {
-		if item == value {
-			return existing
-		}
-	}
-	return append([]string{value}, existing...)
 }
