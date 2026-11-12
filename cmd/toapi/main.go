@@ -66,7 +66,7 @@ func run() (err error) {
 		http.DefaultTransport = transport
 	}
 	cfg := toapi.MustNew()
-	count := flag.Int("c", 10, "注册数量")
+	count := flag.Int("c", 10, "注册数量；续期模式下为重新登录尝试上限，省略则不限")
 	protocolMode := flag.Bool("p", false, "使用协议混合认证；默认使用浏览器")
 	mailProvider := flag.String("m", mail.AddressProviderSunMail, "邮箱地址实现: sun, sl, mm 或 uu")
 	sunMailDomains := flag.String("d", "", "SunMail 域名后缀，多个用逗号分隔")
@@ -83,7 +83,10 @@ func run() (err error) {
 	if saveAccounts.set {
 		storeAccounts = saveAccounts.value
 	}
-	if !*renew && *count <= 0 {
+	if *count <= 0 {
+		if *renew {
+			return errors.New("续期数量必须大于 0")
+		}
 		return errors.New("注册数量必须大于 0")
 	}
 	domains := strings.Split(*sunMailDomains, ",")
@@ -143,7 +146,13 @@ func run() (err error) {
 	}
 	worker := toapi.New(authenticatorFactory, sceneMint, storeAccounts)
 	if *renew {
-		err = worker.Renew(ctx)
+		limit := 0
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "c" {
+				limit = *count
+			}
+		})
+		err = worker.Renew(ctx, limit)
 	} else {
 		err = worker.Start(ctx, *count)
 	}

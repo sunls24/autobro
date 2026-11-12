@@ -42,8 +42,8 @@ func New(authenticatorFactory AuthenticatorFactory, sceneMint *scenemint.Client,
 	}
 }
 
-func logBatchResult(action string, total, failed int) {
-	args := []any{slog.Int("count", total)}
+func logBatchResult(action string, total, failed int, extra ...any) {
+	args := append([]any{slog.Int("count", total)}, extra...)
 	if failed == 0 {
 		logging.Done(action, "批次", args...)
 		return
@@ -210,7 +210,8 @@ func waitRegistrationRetry(ctx context.Context, attempt int) error {
 	}
 }
 
-func (w *Worker) Renew(ctx context.Context) error {
+// Renew 尝试重新登录需要续期的账号。limit 为 0 时不限次数。
+func (w *Worker) Renew(ctx context.Context, limit int) error {
 	accounts, err := loadAccounts(accountsFile)
 	if err != nil {
 		return err
@@ -220,14 +221,19 @@ func (w *Worker) Renew(ctx context.Context) error {
 	}
 	logging.Step("续期", "开始", slog.Int("count", len(accounts)))
 	var failures []error
+	var scanned, attempted int
 	for i := range accounts {
+		if limit > 0 && attempted == limit {
+			break
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
+		scanned = i + 1
 		account := &accounts[i]
-		index, total := i+1, len(accounts)
+		total := len(accounts)
 		progress := func(extra ...any) []any {
-			args := []any{slog.String("email", account.Email), slog.Int("index", index), slog.Int("total", total)}
+			args := []any{slog.String("email", account.Email), slog.Int("index", scanned), slog.Int("total", total)}
 			return append(args, extra...)
 		}
 
@@ -256,6 +262,7 @@ func (w *Worker) Renew(ctx context.Context) error {
 			}
 		}
 
+		attempted++
 		start := time.Now()
 		logging.Step("续期", "重新登录", progress()...)
 		err = w.renewAuthentication(ctx, account)
@@ -299,7 +306,7 @@ func (w *Worker) Renew(ctx context.Context) error {
 		}
 		logging.Done("续期", "账号", progress(slog.Duration("duration", time.Since(start)))...)
 	}
-	logBatchResult("续期", len(accounts), len(failures))
+	logBatchResult("续期", scanned, len(failures), slog.Int("登录尝试", attempted))
 	return errors.Join(failures...)
 }
 

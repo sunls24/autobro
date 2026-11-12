@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -134,6 +135,58 @@ func TestStartCreatesOneAuthenticatorSessionPerAccount(t *testing.T) {
 	defer mu.Unlock()
 	if created != 2 || closed != 2 {
 		t.Fatalf("sessions = created %d, closed %d; want 2 and 2", created, closed)
+	}
+}
+
+func TestRenewLimit(t *testing.T) {
+	t.Chdir(t.TempDir())
+	const (
+		activeEmail  = "active@example.com"
+		failedEmail  = "failed@example.com"
+		pendingEmail = "pending@example.com"
+	)
+	for _, email := range []string{activeEmail, failedEmail, pendingEmail} {
+		if err := appendAccount(accountsFile, &chatgpt.Account{Email: email}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name         string
+		limit        int
+		wantAttempts []string
+	}{
+		{name: "limited", limit: 1, wantAttempts: []string{failedEmail}},
+		{name: "unlimited", wantAttempts: []string{failedEmail, pendingEmail}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				email := r.URL.Query().Get("email")
+				if tc.limit == 1 && email == pendingEmail {
+					t.Errorf("queried %s after reaching the renewal limit", email)
+				}
+				response := `{"code":0}`
+				if email == activeEmail {
+					response = `{"code":0,"data":{"items":[{"status":"active","tokenExpiresAt":"2099-01-01T00:00:00Z"}]}}`
+				}
+				_, _ = io.WriteString(w, response)
+			}))
+			defer server.Close()
+			sceneMint, err := scenemint.NewClient(server.URL, "fixture-key")
+			if err != nil {
+				t.Fatal(err)
+			}
+			auth := &stagedTestAuthenticator{failFirst: true}
+			worker := New(func() (chatgpt.Authenticator, func() error, error) {
+				return auth, func() error { return nil }, nil
+			}, sceneMint, false)
+			if err := worker.Renew(context.Background(), tc.limit); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Renew() error = %v, want %v", err, context.DeadlineExceeded)
+			}
+			if !slices.Equal(auth.emails, tc.wantAttempts) {
+				t.Fatalf("attempted emails = %v, want %v", auth.emails, tc.wantAttempts)
+			}
+		})
 	}
 }
 

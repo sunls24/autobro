@@ -11,7 +11,7 @@ SOURCE_DIRS := $(sort . $(shell find cmd internal -type d))
 .PHONY: help build relog new newsl newslv regsl regslv reguu reguuv newuu
 
 help: ## 显示帮助信息
-	@awk 'BEGIN {FS = ":.*##"; printf "用法:\n  make <目标>\n  make <目标> ARGS=\"...\"\n\n目标:\n"} /^[a-zA-Z0-9_.-]+:.*##/ {printf "  %-10s %s\n", $$1, $$2} END {printf "\n示例:\n  make new ARGS=\"-c 1 -m sl\"\n  make newslv\n  make regslv\n  make reguu\n  make newuu ARGS=\"-c 2\"\n"}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*##"; printf "用法:\n  make <目标>\n  make <目标> ARGS=\"...\"\n\n目标:\n"} /^[a-zA-Z0-9_.-]+:.*##/ {printf "  %-10s %s\n", $$1, $$2} END {printf "\n示例:\n  make relog N=5\n  make new ARGS=\"-c 1 -m sl\"\n  make newslv\n  make regslv\n  make reguu\n  make newuu ARGS=\"-c 2\"\n"}' $(MAKEFILE_LIST)
 
 build: $(BINARY) $(SLREGISTER_BINARY) $(UUMAILREGISTER_BINARY) ## 构建程序
 
@@ -27,8 +27,14 @@ $(UUMAILREGISTER_BINARY): $(GO_FILES) $(SOURCE_DIRS) go.mod go.sum Makefile
 	mkdir -p "$(dir $(UUMAILREGISTER_BINARY))"
 	$(GO) build -o "$(UUMAILREGISTER_BINARY)" ./cmd/uumailregister
 
-relog: $(BINARY) ## 更新需要重新登录的账号
-	set -e; set -a; . "$(ENV_FILE)"; set +a; "./$(BINARY)" -r
+# 禁止 Make 隐式导出时展开 N 中的表达式。
+unexport N
+relog: export AUTOBRO_RELOG_COUNT := $(value N)
+relog: $(BINARY) ## 更新需要重新登录的账号，可用 N 指定尝试上限
+	set -e; set -a; . "$(ENV_FILE)"; set +a; \
+	set -- -r; \
+	if [ -n "$$AUTOBRO_RELOG_COUNT" ]; then set -- "$$@" -c "$$AUTOBRO_RELOG_COUNT"; fi; \
+	"./$(BINARY)" "$$@"
 
 new: $(BINARY) ## 创建任务，可通过 ARGS 传递参数
 	set -e; set -a; . "$(ENV_FILE)"; set +a; "./$(BINARY)" $(ARGS)
