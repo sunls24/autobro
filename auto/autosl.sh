@@ -15,6 +15,9 @@ chmod 600 "$LOG_FILE"
 # 统一收集脚本、make 和 Go 程序的标准输出与错误输出。
 exec >>"$LOG_FILE" 2>&1
 
+# 删除最后修改时间超过 7 天的定时任务日志。
+find "$LOG_DIR" -type f -name 'autosl-*.log' -mmin +10080 -delete
+
 if [[ -r "$HOME/.zprofile" ]]; then
   source "$HOME/.zprofile"
 fi
@@ -51,27 +54,38 @@ save_count() {
   fi
 }
 
-# 无状态时开启新一轮；损坏的状态必须报错，不能默默换号。
-count=4
-if [[ -e "$STATE_FILE" ]]; then
-  count="$(cat "$STATE_FILE")"
-  case "$count" in
-    [0-4]) ;;
-    *) print -u2 "无效的执行次数：$STATE_FILE"; exit 1 ;;
-  esac
-fi
+# 注册单独运行，失败后继续尝试恢复。
+set +e
+(
+  set -e
 
-if (( count == 4 )); then
-  run_make regslv
-  count=0
+  # 无状态时开启新一轮；损坏的状态必须报错，不能默默换号。
+  count=4
+  if [[ -e "$STATE_FILE" ]]; then
+    count="$(cat "$STATE_FILE")"
+    case "$count" in
+      [0-4]) ;;
+      *) print -u2 "无效的执行次数：$STATE_FILE"; exit 1 ;;
+    esac
+  fi
+
+  if (( count == 4 )); then
+    run_make regslv
+    count=0
+    save_count
+  fi
+
+  # 执行前计数，失败或中断也占用一次；每个 make 目标重新加载配置。
+  count=$((count + 1))
   save_count
-fi
+  print "本轮 SL 第 $count/4 次 new"
+  run_make new 'ARGS=-v -m sl -c 1'
+)
+registration_exit=$?
+set -e
 
-# 执行前计数，失败或中断也占用一次；每个 make 目标重新加载配置。
-count=$((count + 1))
-save_count
-print "本轮 SL 第 $count/4 次 new"
-run_make new 'ARGS=-v -m sl -c 1'
+run_make relog N=2
 
-printf "===== %s 定时任务完成 =====\n" \
+printf "===== %s 定时任务结束 =====\n" \
   "$(date '+%Y-%m-%d %H:%M:%S %z')"
+exit "$registration_exit"
