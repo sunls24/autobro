@@ -128,38 +128,51 @@ func launchBrowser(headless bool) (*rod.Browser, *launcher.Launcher, error) {
 	return browser, l, nil
 }
 
-func WaitURLChange(ctx context.Context, page *rod.Page, action func(), checks ...func(*rod.Page) error) (string, error) {
-	nowURL := page.MustInfo().URL
-	_ = rod.Try(action)
-	count := 0
+// pageURL reads the target URL using the caller's context.
+func pageURL(ctx context.Context, page *rod.Page) (string, error) {
+	target := proto.TargetGetTargetInfo{TargetID: page.TargetID}
+	info, err := target.Call(page.Browser().Context(ctx))
+	if err != nil {
+		return "", err
+	}
+	return info.TargetInfo.URL, nil
+}
+
+// SubmitAndWaitForURLChange runs the action once and returns the normalized starting and last observed URLs.
+func SubmitAndWaitForURLChange(ctx context.Context, page *rod.Page, normalize func(string) string, action func() error, checks ...func(*rod.Page) error) (fromURL, lastURL string, err error) {
+	rawURL, err := pageURL(ctx, page)
+	if err != nil {
+		return "", "", err
+	}
+	fromURL = normalize(rawURL)
+	if err := action(); err != nil {
+		return fromURL, fromURL, err
+	}
+	lastURL, err = WaitURLChange(ctx, page, fromURL, normalize, checks...)
+	return fromURL, lastURL, err
+}
+
+// WaitURLChange observes a navigation from an already normalized URL.
+func WaitURLChange(ctx context.Context, page *rod.Page, fromURL string, normalize func(string) string, checks ...func(*rod.Page) error) (string, error) {
+	lastURL := fromURL
 	for {
 		select {
 		case <-ctx.Done():
-			return nowURL, ctx.Err()
-		default:
-			time.Sleep(time.Second)
-			count++
-			newURL := page.MustInfo().URL
-			if newURL != "" && newURL != nowURL {
-				return newURL, nil
-			}
-			for _, check := range checks {
-				if err := check(page); err != nil {
-					return nowURL, err
-				}
-			}
-			if count >= 6 {
-				_ = rod.Try(action)
-				count = 0
+			return lastURL, ctx.Err()
+		case <-time.After(time.Second):
+		}
+		rawURL, err := pageURL(ctx, page)
+		if err != nil {
+			return lastURL, err
+		}
+		lastURL = normalize(rawURL)
+		if lastURL != "" && lastURL != fromURL {
+			return lastURL, nil
+		}
+		for _, check := range checks {
+			if err := check(page); err != nil {
+				return lastURL, err
 			}
 		}
 	}
-}
-
-func MustWaitURLChange(ctx context.Context, page *rod.Page, action func(), checks ...func(*rod.Page) error) string {
-	newURL, err := WaitURLChange(ctx, page, action, checks...)
-	if err != nil {
-		panic(err)
-	}
-	return newURL
 }

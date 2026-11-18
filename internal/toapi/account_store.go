@@ -14,6 +14,7 @@ import (
 )
 
 const accountsFile = "accounts.jsonl"
+const pendingAccountsFile = "accounts.pending.jsonl"
 
 // LoadStoredAccounts 读取默认账号文件；文件不存在时返回空列表。
 func LoadStoredAccounts() ([]chatgpt.Account, error) {

@@ -2,6 +2,7 @@
 .env*
 mise.toml
 accounts.jsonl
+accounts.pending.jsonl
 /bin/
 /auto/logs/
 /auto/autosl.count

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"autobro/internal/chatgpt"
@@ -187,6 +188,42 @@ func TestRenewLimit(t *testing.T) {
 				t.Fatalf("attempted emails = %v, want %v", auth.emails, tc.wantAttempts)
 			}
 		})
+	}
+}
+
+func TestRenewUploadsTokenFromReturnedAccount(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := appendAccount(accountsFile, &chatgpt.Account{Email: "renew@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	var uploads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			uploads.Add(1)
+			body, err := io.ReadAll(r.Body)
+			if err != nil || string(body) != `{"accessToken":"refreshed-token"}` {
+				t.Errorf("uploaded body = %q, error = %v", body, err)
+			}
+		}
+		_, _ = io.WriteString(w, `{"code":0}`)
+	}))
+	defer server.Close()
+	sceneMint, err := scenemint.NewClient(server.URL, "fixture-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := registrationTestFunc(func(_ context.Context, account *chatgpt.Account) (*chatgpt.Account, error) {
+		return &chatgpt.Account{Email: account.Email, AccessToken: "refreshed-token"}, nil
+	})
+	worker := New(func() (chatgpt.Authenticator, func() error, error) {
+		return auth, func() error { return nil }, nil
+	}, sceneMint, false)
+
+	if err := worker.Renew(t.Context(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := uploads.Load(); got != 1 {
+		t.Fatalf("uploads = %d, want 1", got)
 	}
 }
 
@@ -415,5 +452,32 @@ func TestStartPreservesCreatedAccountOnFailure(t *testing.T) {
 				t.Fatalf("incomplete recovery account: %+v", a)
 			}
 		})
+	}
+}
+
+func TestUnconfirmedCreateStopsAndKeepsSeparateRecord(t *testing.T) {
+	t.Chdir(t.TempDir())
+	calls := 0
+	auth := registrationTestFunc(func(_ context.Context, account *chatgpt.Account) (*chatgpt.Account, error) {
+		calls++
+		account.Email = "uncertain@example.com"
+		account.ForwardMail = "forward@example.com"
+		account.ProviderAddressID = 12
+		account.AuthStage = chatgpt.AuthStageCreateUnconfirmed
+		return nil, context.DeadlineExceeded
+	})
+	worker := New(func() (chatgpt.Authenticator, func() error, error) {
+		return auth, func() error { return nil }, nil
+	}, nil, true)
+	if err := worker.Start(t.Context(), 1); !errors.Is(err, context.DeadlineExceeded) || calls != 1 {
+		t.Fatalf("Start = %v, calls = %d", err, calls)
+	}
+	pending, err := loadAccounts(pendingAccountsFile)
+	if err != nil || len(pending) != 1 || pending[0].Email != "uncertain@example.com" || pending[0].ProviderAddressID != 12 {
+		t.Fatalf("pending record missing after reload: %v", err)
+	}
+	accounts, err := LoadStoredAccounts()
+	if err != nil || len(accounts) != 0 {
+		t.Fatalf("renewal queue length = %d, err = %v", len(accounts), err)
 	}
 }

@@ -14,6 +14,7 @@ type AuthStage uint8
 
 const (
 	AuthStageBeforeAccount AuthStage = iota
+	AuthStageCreateUnconfirmed
 	AuthStageAccountCreated
 	AuthStageTokenReady
 )
@@ -37,9 +38,10 @@ const (
 	defaultMailCodeInterval = 30 * time.Second
 	maxMailCodeResends      = 5
 
-	baseURL     = "https://chatgpt.com/"
-	passwordURL = "https://auth.openai.com/create-account/password"
-	emailURL    = "https://auth.openai.com/email-verification"
-	aboutURL    = "https://auth.openai.com/about-you"
-	passkeyURL  = "https://auth.openai.com/create-account-enroll-passkey"
+	baseURL      = "https://chatgpt.com/"
+	loginWithURL = "https://chatgpt.com/auth/login_with"
+	passwordURL  = "https://auth.openai.com/create-account/password"
+	emailURL     = "https://auth.openai.com/email-verification"
+	aboutURL     = "https://auth.openai.com/about-you"
+	passkeyURL   = "https://auth.openai.com/create-account-enroll-passkey"
 )

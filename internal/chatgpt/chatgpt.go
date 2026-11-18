@@ -94,12 +94,11 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 	}
 	// name 用于注册新账号：既作为邮箱地址的本地部分，也填入资料页。
 	name := mail.GenerateName()
-	// addressAcquired 为 true 时，本次流程负责的别名在账号创建前失败时需要释放。
-	// 账号创建成功后别名已经提交，不再自动删除。
+	// 只释放本次新分配、且尚未尝试提交创建请求的别名。
 	addressAcquired := false
 	var addressMetadata mail.AddressMetadata
 	defer func() {
-		if !addressAcquired || a.AuthStage >= AuthStageAccountCreated {
+		if !addressAcquired || a.AuthStage >= AuthStageCreateUnconfirmed {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -140,11 +139,14 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 
 	logging.Sub("账号信息", slog.String("email", a.Email), slog.String("address", forwardMail))
 	f.markStep("打开浏览器页面")
-	page := browser.MustBackgroundPage(f.bro)
-	if page == nil {
-		panic("page is nil")
-	}
-	defer page.MustClose()
+	page := browser.MustBackgroundPage(f.bro.Context(ctx))
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := page.Context(closeCtx).Close(); closeErr != nil {
+			logAuthWarning("浏览器", "关闭页面失败", slog.Any("err", closeErr))
+		}
+	}()
 
 	f.markStep("清理登录状态")
 	if err = clearSession(page); err != nil {
@@ -155,7 +157,7 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 	page.MustNavigate(baseURL)
 	page.MustWaitLoad()
 
-	switch page.MustInfo().URL {
+	switch authPageURL(page.MustInfo().URL) {
 	case baseURL:
 		emailFound := false
 		_, _ = page.Timeout(timeout).Race().
@@ -184,40 +186,68 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 		MustWaitVisible().
 		MustSelectAllText().
 		MustInput(strings.TrimSpace(a.Email))
-	nowURL := browser.MustWaitURLChange(ctx, page, func() {
-		email.MustType(input.Enter)
+	var fromURL, nowURL string
+	navigate := func(action func() error, checks ...func(*rod.Page) error) {
+		var err error
+		fromURL, nowURL, err = browser.SubmitAndWaitForURLChange(ctx, page, authPageURL, action, checks...)
+		if err != nil {
+			panic(fmt.Errorf("页面跳转（来源 %q，最后观测 %q）：%w", fromURL, nowURL, err))
+		}
+		logAuthTrace("浏览器", "页面跳转", slog.String("url", nowURL))
+	}
+	clickSubmit := func(selector string, checks ...func(*rod.Page) error) {
+		navigate(func() error {
+			submitPage := page.Timeout(timeout)
+			defer submitPage.CancelTimeout()
+			button, err := submitPage.Element(selector)
+			if err != nil {
+				return fmt.Errorf("查找提交按钮：%w", err)
+			}
+			if err := button.Click(proto.InputMouseButtonLeft, 1); err != nil {
+				return fmt.Errorf("点击提交按钮：%w", err)
+			}
+			return nil
+		}, checks...)
+	}
+	navigate(func() error {
+		if err := email.Type(input.Enter); err != nil {
+			return fmt.Errorf("按回车提交邮箱：%w", err)
+		}
+		return nil
 	})
+	if nowURL == loginWithURL {
+		fromURL = nowURL
+		nowURL, err = browser.WaitURLChange(ctx, page, fromURL, authPageURL)
+		if err != nil {
+			panic(fmt.Errorf("等待登录中转跳转（来源 %q，最后观测 %q）：%w", fromURL, nowURL, err))
+		}
+		logAuthTrace("浏览器", "页面跳转", slog.String("url", nowURL))
+	}
 
-inputEmail:
-	f.markStep("页面跳转", slog.String("url", nowURL))
-	switch withoutURLQuery(nowURL) {
+	switch nowURL {
 	case passwordURL:
 		f.markStep("输入密码")
 		if a.Password == "" {
 			a.Password = gox.RandStr(11) + "@"
 		}
 		page.MustElement(`input[type="password"]`).MustInput(a.Password)
-		nowURL = browser.MustWaitURLChange(ctx, page, func() {
-			page.Timeout(timeout).MustElement(`button[data-dd-action-name="Continue"]`).MustClick()
-		})
-		if withoutURLQuery(nowURL) != emailURL {
+		clickSubmit(`button[data-dd-action-name="Continue"]`)
+		if nowURL != emailURL {
 			break
 		}
 		fallthrough
 	case emailURL:
 		f.markStep("等待邮箱验证码")
 		if err = f.waitMailCode(ctx, forwardMail, func(code string) {
-			page.Context(ctx).Timeout(timeout).MustElement(`input[inputmode="numeric"]`).MustInput(code)
+			page.Timeout(timeout).MustElement(`input[inputmode="numeric"]`).MustInput(code)
 		}, func() {
-			page.Context(ctx).Timeout(timeout).MustElement(`button[name="intent"][value="resend"]`).MustClick()
+			page.Timeout(timeout).MustElement(`button[name="intent"][value="resend"]`).MustClick()
 		}); err != nil {
 			panic(err)
 		}
 		f.markStep("校验邮箱验证码")
-		nowURL = browser.MustWaitURLChange(ctx, page, func() {
-			page.Timeout(timeout).MustElement(`button[name="intent"][value="validate"]`).MustClick()
-		}, func(page *rod.Page) error {
-			err := checkAccountDeactivated(page.Context(ctx).Timeout(timeout))
+		clickSubmit(`button[name="intent"][value="validate"]`, func(page *rod.Page) error {
+			err := checkAccountDeactivated(page.Timeout(timeout))
 			if errors.Is(err, ErrAccountDeactivated) {
 				// 保留已使用标记，避免停用账号的别名被释放后再次分配。
 				f.m.ForgetAddress(a.Email)
@@ -227,16 +257,9 @@ inputEmail:
 		})
 		logging.SubDone("邮箱验证码已校验")
 	default:
-		if strings.Contains(nowURL, "/auth/login_with") {
-			time.Sleep(time.Second * 1)
-			nowURL = page.MustInfo().URL
-			goto inputEmail
-		}
-
-		unexpectedURL(nowURL)
+		unexpectedURL(fromURL, nowURL)
 	}
 
-	f.markStep("页面跳转", slog.String("url", nowURL))
 	switch nowURL {
 	case aboutURL:
 		page.MustWaitLoad()
@@ -261,12 +284,34 @@ inputEmail:
 			page.Timeout(timeout).MustWait(`(want) => document.querySelector('input[name="birthday"]')?.value === want`, want)
 		}
 		f.markStep("创建账号")
-		nowURL = browser.MustWaitURLChange(ctx, page, func() {
-			page.Timeout(timeout).MustElement(`button[type="submit"][data-dd-action-name="Continue"]`).MustClick()
+		navigate(func() error {
+			submitPage := page.Timeout(timeout)
+			defer submitPage.CancelTimeout()
+			button, err := submitPage.Element(`button[type="submit"][data-dd-action-name="Continue"]`)
+			if err != nil {
+				return fmt.Errorf("查找创建账号按钮：%w", err)
+			}
+			if err := button.Hover(); err != nil {
+				return fmt.Errorf("将鼠标移到创建账号按钮：%w", err)
+			}
+			if err := button.WaitEnabled(); err != nil {
+				return fmt.Errorf("等待创建账号按钮可用：%w", err)
+			}
+			if err := submitPage.GetContext().Err(); err != nil {
+				return fmt.Errorf("准备提交创建账号：%w", err)
+			}
+			if addressAcquired {
+				// 点击可能已送达，即使浏览器随后报错，也不能再释放别名。
+				a.AuthStage = AuthStageCreateUnconfirmed
+			}
+			if err := page.Mouse.Click(proto.InputMouseButtonLeft, 1); err != nil {
+				return fmt.Errorf("点击创建账号按钮：%w", err)
+			}
+			return nil
 		})
 	case baseURL:
 	default:
-		unexpectedURL(nowURL)
+		unexpectedURL(fromURL, nowURL)
 	}
 	switch nowURL {
 	case passkeyURL:
@@ -274,12 +319,10 @@ inputEmail:
 		// 失败时也必须保留当前账号和邮箱别名，下一次改走登录流程。
 		a.AuthStage = AuthStageAccountCreated
 		f.markStep("跳过 Passkey")
-		nowURL = browser.MustWaitURLChange(ctx, page, func() {
-			page.Timeout(timeout).MustElement(`[data-dd-action-name="skip create account enroll passkey"]`).MustClick()
-		})
+		clickSubmit(`[data-dd-action-name="skip create account enroll passkey"]`)
 	}
 	if nowURL != baseURL {
-		unexpectedURL(nowURL)
+		unexpectedURL(fromURL, nowURL)
 	}
 	logging.SubDone("账号已创建")
 	if a.AuthStage < AuthStageAccountCreated {
@@ -372,12 +415,14 @@ func clearSession(page *rod.Page) (err error) {
 	return nil
 }
 
-// 页面识别忽略查询参数，实际导航和错误日志仍保留完整 URL。
-func withoutURLQuery(raw string) string {
-	address, _, _ := strings.Cut(raw, "?")
-	return address
+// 页面识别和跳转诊断只使用 URL 中的页面地址。
+func authPageURL(raw string) string {
+	if i := strings.IndexAny(raw, "?#"); i >= 0 {
+		return raw[:i]
+	}
+	return raw
 }
 
-func unexpectedURL(url string) {
-	panic("意外的URL: " + url)
+func unexpectedURL(from, to string) {
+	panic(fmt.Errorf("意外的 URL %q（来源 %q）", to, from))
 }

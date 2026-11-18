@@ -70,16 +70,22 @@ func (w *Worker) Start(ctx context.Context, count int) error {
 				return errors.Join(ctxErr, err)
 			}
 
+			var pendingSaveErr error
 			if state.account.AuthStage == chatgpt.AuthStageTokenReady && state.account.AccessToken != "" {
 				logging.Step("注册", "处理账号", slog.Int("index", index), slog.Int("total", total), slog.Int("attempt", attempt))
 				err = w.finishRegistration(ctx, state, index, total)
 			} else {
 				logging.Step("注册", "开始认证", slog.Int("index", index), slog.Int("total", total), slog.Int("attempt", attempt))
-				err = w.runWithAuthenticator(func(authenticator chatgpt.Authenticator) error {
-					return w.authenticateOne(ctx, authenticator, state.account)
-				})
+				err = w.authenticateOne(ctx, state.account)
 				if err == nil {
 					err = w.finishRegistration(ctx, state, index, total)
+				} else if state.account.AuthStage == chatgpt.AuthStageCreateUnconfirmed {
+					err = fmt.Errorf("创建结果未确认，已保留邮箱别名：%w", err)
+					if w.storeAccounts {
+						if pendingSaveErr = appendAccount(pendingAccountsFile, state.account); pendingSaveErr != nil {
+							err = errors.Join(err, fmt.Errorf("保存待核对账号失败：%w", pendingSaveErr))
+						}
+					}
 				} else if state.account.AuthStage >= chatgpt.AuthStageAccountCreated && !errors.Is(err, chatgpt.ErrAccountDeactivated) {
 					// 认证尚未完成也保存已创建的账号，最终失败或取消后可通过续期恢复。
 					err = errors.Join(err, w.storeRegistration(state))
@@ -89,6 +95,9 @@ func (w *Worker) Start(ctx context.Context, count int) error {
 				break
 			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
+				if pendingSaveErr != nil {
+					logging.Failure("注册", "保存待核对账号", pendingSaveErr, slog.String("file", pendingAccountsFile))
+				}
 				return errors.Join(ctxErr, err)
 			}
 			if attempt == maxRegistrationAttempts || !retryableRegistrationError(state.account, err) {
@@ -130,25 +139,27 @@ func (w *Worker) runWithAuthenticator(fn func(chatgpt.Authenticator) error) (err
 	return fn(authenticator)
 }
 
-func (w *Worker) authenticateOne(ctx context.Context, authenticator chatgpt.Authenticator, account *chatgpt.Account) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
+func (w *Worker) authenticateOne(ctx context.Context, account *chatgpt.Account) error {
+	return w.runWithAuthenticator(func(authenticator chatgpt.Authenticator) error {
+		authCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
 
-	a, err := authenticator.RegisterOrLogin(ctx, account)
-	if err != nil {
-		return err
-	}
-	if a == nil {
-		return errors.New("认证未返回账号")
-	}
-	if a != account {
-		*account = *a
-	}
-	if strings.TrimSpace(account.AccessToken) == "" {
-		return errors.New("认证未返回访问令牌")
-	}
-	account.AuthStage = chatgpt.AuthStageTokenReady
-	return nil
+		result, err := authenticator.RegisterOrLogin(authCtx, account)
+		if err != nil {
+			return err
+		}
+		if result == nil {
+			return errors.New("认证未返回账号")
+		}
+		if result != account {
+			*account = *result
+		}
+		if strings.TrimSpace(account.AccessToken) == "" {
+			return errors.New("认证未返回访问令牌")
+		}
+		account.AuthStage = chatgpt.AuthStageTokenReady
+		return nil
+	})
 }
 
 func (w *Worker) storeRegistration(state *registrationState) error {
@@ -182,6 +193,9 @@ func (w *Worker) finishRegistration(ctx context.Context, state *registrationStat
 
 func retryableRegistrationError(account *chatgpt.Account, err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, chatgpt.ErrAccountDeactivated) || errors.Is(err, chatgpt.ErrMailCodeTimeout) {
+		return false
+	}
+	if account != nil && account.AuthStage == chatgpt.AuthStageCreateUnconfirmed {
 		return false
 	}
 	if account != nil && account.AuthStage >= chatgpt.AuthStageAccountCreated {
@@ -265,7 +279,7 @@ func (w *Worker) Renew(ctx context.Context, limit int) error {
 		attempted++
 		start := time.Now()
 		logging.Step("续期", "重新登录", progress()...)
-		err = w.renewAuthentication(ctx, account)
+		err = w.authenticateOne(ctx, account)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
@@ -291,11 +305,6 @@ func (w *Worker) Renew(ctx context.Context, limit int) error {
 			failures = append(failures, fmt.Errorf("续期账号 %s：%w", account.Email, err))
 			continue
 		}
-		if strings.TrimSpace(account.AccessToken) == "" {
-			logging.Failure("续期", "访问令牌", errors.New("重新登录后仍为空"), progress()...)
-			failures = append(failures, fmt.Errorf("续期账号 %s：访问令牌为空", account.Email))
-			continue
-		}
 		if err = w.sceneMint.Upload(ctx, account.AccessToken); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
@@ -308,13 +317,4 @@ func (w *Worker) Renew(ctx context.Context, limit int) error {
 	}
 	logBatchResult("续期", scanned, len(failures), slog.Int("登录尝试", attempted))
 	return errors.Join(failures...)
-}
-
-func (w *Worker) renewAuthentication(ctx context.Context, account *chatgpt.Account) error {
-	return w.runWithAuthenticator(func(authenticator chatgpt.Authenticator) error {
-		renewCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		defer cancel()
-		_, err := authenticator.RegisterOrLogin(renewCtx, account)
-		return err
-	})
 }
