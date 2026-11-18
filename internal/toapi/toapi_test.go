@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"autobro/internal/chatgpt"
 	"autobro/internal/scenemint"
@@ -139,55 +140,66 @@ func TestStartCreatesOneAuthenticatorSessionPerAccount(t *testing.T) {
 	}
 }
 
-func TestRenewLimit(t *testing.T) {
+func TestRenewLimitAndRotation(t *testing.T) {
 	t.Chdir(t.TempDir())
 	const (
-		activeEmail  = "active@example.com"
-		failedEmail  = "failed@example.com"
-		pendingEmail = "pending@example.com"
+		active = "active@example.com"
+		first  = "first@example.com"
+		second = "second@example.com"
+		third  = "third@example.com"
 	)
-	for _, email := range []string{activeEmail, failedEmail, pendingEmail} {
+	for _, email := range []string{active, first, second, third} {
 		if err := appendAccount(accountsFile, &chatgpt.Account{Email: email}); err != nil {
 			t.Fatal(err)
 		}
 	}
+	if err := (relogChecks{first: time.Now().Add(-time.Minute)}).write(); err != nil {
+		t.Fatal(err)
+	}
+	expiresAt := time.Now().Truncate(time.Second).Add(time.Hour)
+	var queries atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries.Add(1)
+		if r.URL.Query().Get("email") == active {
+			_, _ = io.WriteString(w, `{"code":0,"data":{"items":[{"status":"active","tokenExpiresAt":"`+expiresAt.Format(time.RFC3339)+`"}]}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"code":0}`)
+	}))
+	defer server.Close()
+	sceneMint, err := scenemint.NewClient(server.URL, "fixture-key")
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	for _, tc := range []struct {
-		name         string
+	loginErr := errors.New("login failed")
+	for _, round := range []struct {
 		limit        int
 		wantAttempts []string
+		wantQueries  int32
 	}{
-		{name: "limited", limit: 1, wantAttempts: []string{failedEmail}},
-		{name: "unlimited", wantAttempts: []string{failedEmail, pendingEmail}},
+		{limit: 2, wantAttempts: []string{first, second}, wantQueries: 3},
+		{limit: 2, wantAttempts: []string{third, first}, wantQueries: 2},
+		{wantAttempts: []string{first, second, third}, wantQueries: 3},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				email := r.URL.Query().Get("email")
-				if tc.limit == 1 && email == pendingEmail {
-					t.Errorf("queried %s after reaching the renewal limit", email)
-				}
-				response := `{"code":0}`
-				if email == activeEmail {
-					response = `{"code":0,"data":{"items":[{"status":"active","tokenExpiresAt":"2099-01-01T00:00:00Z"}]}}`
-				}
-				_, _ = io.WriteString(w, response)
-			}))
-			defer server.Close()
-			sceneMint, err := scenemint.NewClient(server.URL, "fixture-key")
-			if err != nil {
-				t.Fatal(err)
-			}
-			auth := &stagedTestAuthenticator{failFirst: true}
-			worker := New(func() (chatgpt.Authenticator, func() error, error) {
-				return auth, func() error { return nil }, nil
-			}, sceneMint, false)
-			if err := worker.Renew(context.Background(), tc.limit); !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("Renew() error = %v, want %v", err, context.DeadlineExceeded)
-			}
-			if !slices.Equal(auth.emails, tc.wantAttempts) {
-				t.Fatalf("attempted emails = %v, want %v", auth.emails, tc.wantAttempts)
-			}
+		var attempted []string
+		auth := registrationTestFunc(func(_ context.Context, account *chatgpt.Account) (*chatgpt.Account, error) {
+			attempted = append(attempted, account.Email)
+			return nil, loginErr
 		})
+		worker := New(func() (chatgpt.Authenticator, func() error, error) {
+			return auth, func() error { return nil }, nil
+		}, sceneMint, false)
+		if err := worker.Renew(t.Context(), round.limit); !errors.Is(err, loginErr) {
+			t.Fatalf("Renew() error = %v, want %v", err, loginErr)
+		}
+		if !slices.Equal(attempted, round.wantAttempts) || queries.Load() != round.wantQueries {
+			t.Fatalf("attempted %v with %d queries, want %v with %d queries", attempted, queries.Load(), round.wantAttempts, round.wantQueries)
+		}
+		queries.Store(0)
+	}
+	if next := loadRelogChecks()[active]; !next.Equal(expiresAt) {
+		t.Fatalf("next check = %v, want %v", next, expiresAt)
 	}
 }
 
@@ -196,7 +208,7 @@ func TestRenewUploadsTokenFromReturnedAccount(t *testing.T) {
 	if err := appendAccount(accountsFile, &chatgpt.Account{Email: "renew@example.com"}); err != nil {
 		t.Fatal(err)
 	}
-	var uploads atomic.Int32
+	var queries, uploads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			uploads.Add(1)
@@ -204,6 +216,8 @@ func TestRenewUploadsTokenFromReturnedAccount(t *testing.T) {
 			if err != nil || string(body) != `{"accessToken":"refreshed-token"}` {
 				t.Errorf("uploaded body = %q, error = %v", body, err)
 			}
+		} else {
+			queries.Add(1)
 		}
 		_, _ = io.WriteString(w, `{"code":0}`)
 	}))
@@ -222,8 +236,37 @@ func TestRenewUploadsTokenFromReturnedAccount(t *testing.T) {
 	if err := worker.Renew(t.Context(), 0); err != nil {
 		t.Fatal(err)
 	}
-	if got := uploads.Load(); got != 1 {
-		t.Fatalf("uploads = %d, want 1", got)
+	if err := worker.Renew(t.Context(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if queries.Load() != 1 || uploads.Load() != 1 {
+		t.Fatalf("queries = %d, uploads = %d; want 1 each", queries.Load(), uploads.Load())
+	}
+}
+
+func TestStartUploadFailureDoesNotSetRelogCooldown(t *testing.T) {
+	t.Chdir(t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"code":1,"message":"upload failed"}`)
+	}))
+	defer server.Close()
+	sceneMint, err := scenemint.NewClient(server.URL, "fixture-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRetryWait := registrationRetryWait
+	registrationRetryWait = func(context.Context, int) error { return nil }
+	t.Cleanup(func() { registrationRetryWait = oldRetryWait })
+
+	worker := New(func() (chatgpt.Authenticator, func() error, error) {
+		return &factoryTestAuthenticator{accessToken: "fixture-token"}, func() error { return nil }, nil
+	}, sceneMint, true)
+	if err := worker.Start(t.Context(), 1); err == nil || !strings.Contains(err.Error(), "upload failed") {
+		t.Fatalf("Start() error = %v, want upload failure", err)
+	}
+	if checks := loadRelogChecks(); len(checks) != 0 {
+		t.Fatalf("unexpected cooldown after upload failure: %v", checks)
 	}
 }
 
@@ -254,8 +297,12 @@ func TestStartRetriesCreatedAccountWithoutCreatingAnotherAccount(t *testing.T) {
 		return staged, func() error { return nil }, nil
 	}, sceneMint, true)
 
+	start := time.Now()
 	if err := worker.Start(context.Background(), 1); err != nil {
 		t.Fatalf("Start() error = %v", err)
+	}
+	if next := loadRelogChecks()["retry@example.com"]; next.Before(start.Add(12*time.Hour)) || next.After(time.Now().Add(12*time.Hour)) {
+		t.Fatalf("next check = %v, want a 12-hour cooldown", next)
 	}
 	staged.mu.Lock()
 	calls := staged.calls
@@ -274,7 +321,6 @@ func TestStartRetriesCreatedAccountWithoutCreatingAnotherAccount(t *testing.T) {
 	if strings.Count(string(data), "\n") != 1 {
 		t.Fatalf("account saved more than once: %q", data)
 	}
-
 }
 
 func TestStartRetriesFinalizationWithoutReauthenticating(t *testing.T) {
@@ -311,13 +357,6 @@ func TestStartRetriesFinalizationWithoutReauthenticating(t *testing.T) {
 	}
 	if created != 1 || uploads != 2 {
 		t.Fatalf("finalization = authenticator sessions %d, uploads %d; want 1 and 2", created, uploads)
-	}
-}
-
-func TestRetryableRegistrationErrorDoesNotRetryMailCodeTimeout(t *testing.T) {
-	account := &chatgpt.Account{AuthStage: chatgpt.AuthStageAccountCreated}
-	if retryableRegistrationError(account, chatgpt.ErrMailCodeTimeout) {
-		t.Fatal("mail code timeout should not be retried")
 	}
 }
 

@@ -54,6 +54,8 @@ func logBatchResult(action string, total, failed int, extra ...any) {
 
 func (w *Worker) Start(ctx context.Context, count int) error {
 	logging.Step("注册", "开始", slog.Int("count", count))
+	checkUpdates := make(relogChecks)
+	defer checkUpdates.save()
 	var failures []error
 	for i := 0; i < count; i++ {
 		if err := ctx.Err(); err != nil {
@@ -92,6 +94,9 @@ func (w *Worker) Start(ctx context.Context, count int) error {
 				}
 			}
 			if err == nil {
+				if state.stored {
+					checkUpdates[strings.TrimSpace(state.account.Email)] = time.Now().Add(relogCheckInterval)
+				}
 				break
 			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -234,18 +239,31 @@ func (w *Worker) Renew(ctx context.Context, limit int) error {
 		return fmt.Errorf("本地账号文件 %s 中没有账号", accountsFile)
 	}
 	logging.Step("续期", "开始", slog.Int("count", len(accounts)))
+	checks := loadRelogChecks()
+	checkUpdates := make(relogChecks)
+	defer checkUpdates.save()
+	startIndex := 0
+	if limit > 0 {
+		startIndex = relogStartIndex(accounts)
+	}
+	total := len(accounts)
 	var failures []error
-	var scanned, attempted int
-	for i := range accounts {
-		if limit > 0 && attempted == limit {
-			break
-		}
+	var scanned, attempted, cooled int
+	for offset := range total {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		scanned = i + 1
-		account := &accounts[i]
-		total := len(accounts)
+		account := &accounts[(startIndex+offset)%total]
+		if limit > 0 && attempted == limit {
+			saveRelogCursor(account.Email)
+			break
+		}
+		scanned = offset + 1
+		email := strings.TrimSpace(account.Email)
+		if checks[email].After(time.Now()) {
+			cooled++
+			continue
+		}
 		progress := func(extra ...any) []any {
 			args := []any{slog.String("email", account.Email), slog.Int("index", scanned), slog.Int("total", total)}
 			return append(args, extra...)
@@ -263,7 +281,13 @@ func (w *Worker) Renew(ctx context.Context, limit int) error {
 		if remote != nil {
 			switch remote.Status {
 			case "active":
-				if remote.TokenExpiresAt.After(time.Now()) {
+				now := time.Now()
+				if remote.TokenExpiresAt.After(now) {
+					nextCheck := now.Add(relogCheckInterval)
+					if remote.TokenExpiresAt.Before(nextCheck) {
+						nextCheck = remote.TokenExpiresAt
+					}
+					checkUpdates[email] = nextCheck
 					logging.Skip("续期", "未过期", progress()...)
 					continue
 				}
@@ -313,8 +337,9 @@ func (w *Worker) Renew(ctx context.Context, limit int) error {
 			failures = append(failures, fmt.Errorf("上传续期账号 %s：%w", account.Email, err))
 			continue
 		}
+		checkUpdates[email] = time.Now().Add(relogCheckInterval)
 		logging.Done("续期", "账号", progress(slog.Duration("duration", time.Since(start)))...)
 	}
-	logBatchResult("续期", scanned, len(failures), slog.Int("登录尝试", attempted))
+	logBatchResult("续期", scanned, len(failures), slog.Int("登录尝试", attempted), slog.Int("冷却跳过", cooled))
 	return errors.Join(failures...)
 }

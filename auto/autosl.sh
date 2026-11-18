@@ -6,6 +6,7 @@ PROJECT_DIR="$(cd -- "$AUTO_DIR/.." && pwd)"
 LOG_DIR="$AUTO_DIR/logs"
 LOG_FILE="$LOG_DIR/autosl-$(date '+%Y-%m-%d').log"
 STATE_FILE="$AUTO_DIR/autosl.count"
+ROTATE_AFTER=3
 
 umask 077
 mkdir -p "$LOG_DIR"
@@ -60,7 +61,7 @@ set +e
   set -e
 
   # 无状态时开启新一轮；损坏的状态必须报错，不能默默换号。
-  count=4
+  count="$ROTATE_AFTER"
   if [[ -e "$STATE_FILE" ]]; then
     count="$(cat "$STATE_FILE")"
     case "$count" in
@@ -69,7 +70,7 @@ set +e
     esac
   fi
 
-  if (( count == 4 )); then
+  if (( count >= ROTATE_AFTER )); then
     run_make regslv
     count=0
     save_count
@@ -78,7 +79,7 @@ set +e
   # 执行前计数，失败或中断也占用一次；每个 make 目标重新加载配置。
   count=$((count + 1))
   save_count
-  print "本轮 SL 第 $count/4 次 new"
+  print "本轮 SL 第 $count/$ROTATE_AFTER 次 new"
   run_make new 'ARGS=-v -m sl -c 1'
 )
 registration_exit=$?

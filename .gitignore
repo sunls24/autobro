@@ -3,6 +3,9 @@
 mise.toml
 accounts.jsonl
 accounts.pending.jsonl
+/relog-checks.json
+/relog-cursor
+/.relog-*.tmp
 /bin/
 /auto/logs/
 /auto/autosl.count

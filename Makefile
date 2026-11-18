@@ -39,11 +39,11 @@ relog: $(BINARY) ## 更新需要重新登录的账号，可用 N 指定尝试上
 new: $(BINARY) ## 创建任务，可通过 ARGS 传递参数
 	set -e; set -a; . "$(ENV_FILE)"; set +a; "./$(BINARY)" $(ARGS)
 
-newsl: $(BINARY) ## 使用 SimpleLogin 创建 4 个新任务
-	set -e; set -a; . "$(ENV_FILE)"; set +a; "./$(BINARY)" -m sl -c 4
+newsl: $(BINARY) ## 使用 SimpleLogin 创建 3 个新任务
+	set -e; set -a; . "$(ENV_FILE)"; set +a; "./$(BINARY)" -m sl -c 3
 
-newslv: $(BINARY) ## 使用 SimpleLogin 创建 4 个新任务并输出详细日志
-	set -e; set -a; . "$(ENV_FILE)"; set +a; "./$(BINARY)" -v -m sl -c 4
+newslv: $(BINARY) ## 使用 SimpleLogin 创建 3 个新任务并输出详细日志
+	set -e; set -a; . "$(ENV_FILE)"; set +a; "./$(BINARY)" -v -m sl -c 3
 
 regsl: $(SLREGISTER_BINARY) ## 注册 SimpleLogin，可通过 ARGS 传递参数
 	set -e; set -a; . "$(ENV_FILE)"; set +a; "./$(SLREGISTER_BINARY)" -env "$(ENV_FILE)" $(ARGS)
