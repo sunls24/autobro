@@ -72,20 +72,50 @@ func New(options ...Options) *Flow {
 	return opts
 }
 
-func clickLogin(page *rod.Page) {
-	selector := `
-		button[data-testid="login-button"],
-		button[data-mobile-auth-entry-action="login"]
-	`
-	for _, button := range page.MustElements(selector) {
-		if button.MustVisible() && !button.MustDisabled() {
-			button.
-				MustScrollIntoView().
-				MustClick()
-			return
+const (
+	loginButtonSelector = `button[data-testid="login-button"], button[data-mobile-auth-entry-action="login"]`
+	emailInputSelector  = `#email, #mobile-auth-email`
+	authButtonPoint     = `(button) => {
+		const rect = button.getBoundingClientRect();
+		const x = (Math.max(0, rect.left) + Math.min(innerWidth, rect.right)) / 2;
+		const y = (Math.max(0, rect.top) + Math.min(innerHeight, rect.bottom)) / 2;
+		return !button.matches(":disabled") && button.contains(document.elementFromPoint(x, y)) ? {x, y} : null;
+	}`
+	findAuthControl = `(emailSelector, loginSelector) => {
+		const visible = (element) => !element.matches(":disabled") && element.getClientRects().length &&
+			getComputedStyle(element).visibility === "visible";
+		const email = Array.from(document.querySelectorAll(emailSelector)).find(visible);
+		if (email || !loginSelector) return email ?? null;
+
+		const point = ` + authButtonPoint + `;
+		return Array.from(document.querySelectorAll(loginSelector)).find(button => {
+			if (!visible(button)) return false;
+			if (point(button)) return true;
+			button.scrollIntoView({block: "nearest", inline: "nearest", behavior: "instant"});
+			return point(button) !== null;
+		}) ?? null;
+	}`
+)
+
+func (f *Flow) homeEmailInput(page *rod.Page) *rod.Element {
+	entryPage := page.Timeout(timeout)
+	defer entryPage.CancelTimeout()
+
+	for {
+		control := entryPage.MustElementByJS(findAuthControl, emailInputSelector, loginButtonSelector)
+		if control.MustMatches(emailInputSelector) {
+			return control.Context(page.GetContext())
 		}
+
+		// Recheck the hit point because the button can move after the query.
+		point := control.MustEval(`function () { return (` + authButtonPoint + `)(this); }`)
+		if point.Nil() {
+			continue
+		}
+		f.markStep("点击登录")
+		page.Mouse.MustMoveTo(point.Get("x").Num(), point.Get("y").Num()).MustClick(proto.InputMouseButtonLeft)
+		return nil
 	}
-	panic("没有找到可见的登录按钮")
 }
 
 func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
@@ -139,7 +169,10 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 
 	logging.Sub("账号信息", slog.String("email", a.Email), slog.String("address", forwardMail))
 	f.markStep("打开浏览器页面")
-	page := browser.MustBackgroundPage(f.bro.Context(ctx))
+	page, err := browser.NewBackgroundPage(f.bro.Context(ctx))
+	if err != nil {
+		panic(err)
+	}
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -157,35 +190,17 @@ func (f *Flow) MustRegisterOrLogin(ctx context.Context, a *Account) *Account {
 	page.MustNavigate(baseURL)
 	page.MustWaitLoad()
 
-	switch authPageURL(page.MustInfo().URL) {
-	case baseURL:
-		emailFound := false
-		_, _ = page.Timeout(timeout).Race().
-			ElementR("div.text-xl.font-medium", "全新 ChatGPT Images").
-			MustHandle(func(_ *rod.Element) {
-				_ = page.Keyboard.Press(input.Escape)
-			}).
-			Element("#email").
-			MustHandle(func(_ *rod.Element) {
-				emailFound = true
-			}).
-			Do()
-
-		if !emailFound {
-			f.markStep("点击登录")
-			clickLogin(page)
-		}
+	var email *rod.Element
+	if authPageURL(page.MustInfo().URL) == baseURL {
+		email = f.homeEmailInput(page)
 	}
 	f.markStep("输入邮箱并继续")
-	page.Timeout(timeout * 2).
-		MustElement("#email, #mobile-auth-email").
-		MustWaitVisible().
-		MustInput(a.Email)
-	email := page.Timeout(timeout * 2).
-		MustElement("#email, #mobile-auth-email").
-		MustWaitVisible().
-		MustSelectAllText().
-		MustInput(strings.TrimSpace(a.Email))
+	emailPage := page.Timeout(timeout * 2)
+	defer emailPage.CancelTimeout()
+	if email == nil {
+		email = emailPage.MustElementByJS(findAuthControl, emailInputSelector)
+	}
+	email = email.Context(emailPage.GetContext()).MustSelectAllText().MustInput(strings.TrimSpace(a.Email))
 	var fromURL, nowURL string
 	navigate := func(action func() error, checks ...func(*rod.Page) error) {
 		var err error

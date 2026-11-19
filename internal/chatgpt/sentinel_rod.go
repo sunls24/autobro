@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"autobro/internal/browser"
+
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 )
@@ -234,9 +236,7 @@ func (p *rodSentinelProvider) openRuntimePage(ctx context.Context, request Senti
 			}
 		}
 	}
-	page, err := p.browser.Context(ctx).Page(proto.TargetCreateTarget{
-		Background: true,
-	})
+	page, err := browser.NewBackgroundPage(p.browser.Context(ctx))
 	if err != nil {
 		return nil, &rodSentinelProviderError{
 			kind:  ErrSentinelUnsupported,
@@ -252,9 +252,8 @@ func (p *rodSentinelProvider) openRuntimePage(ctx context.Context, request Senti
 	}()
 	if strings.TrimSpace(request.UserAgent) != "" {
 		if err = page.SetUserAgent(&proto.NetworkSetUserAgentOverride{
-			UserAgent:      request.UserAgent,
-			AcceptLanguage: "zh-CN,zh;q=0.9,en;q=0.8",
-			Platform:       "MacIntel",
+			UserAgent: request.UserAgent,
+			Platform:  "MacIntel",
 		}); err != nil {
 			return nil, &rodSentinelProviderError{
 				kind:  ErrSentinelUnsupported,
@@ -298,9 +297,7 @@ func (p *rodSentinelProvider) openChallengePage(ctx context.Context, target stri
 			return nil, fmt.Errorf("import challenge cookies: %w", err)
 		}
 	}
-	page, err := p.browser.Context(ctx).Page(proto.TargetCreateTarget{
-		Background: true,
-	})
+	page, err := browser.NewBackgroundPage(p.browser.Context(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("open challenge page: %w", err)
 	}

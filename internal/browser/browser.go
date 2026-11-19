@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/defaults"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/launcher/flags"
 	"github.com/go-rod/rod/lib/proto"
@@ -19,23 +20,44 @@ import (
 // Session owns the browser process and account-scoped browser context for a
 // single account attempt. Pages created from Browser belong to this session.
 type Session struct {
-	browser   *rod.Browser
-	launcher  *launcher.Launcher
-	closeOnce sync.Once
-	closeErr  error
+	browser      *rod.Browser
+	launcher     *launcher.Launcher
+	ownedProfile string
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 const browserCloseTimeout = 5 * time.Second
 
-// NewSession creates a fresh temporary browser profile for one account.
+// NewSession launches a browser with a temporary profile unless Rod specifies one.
 func NewSession(headless bool) (*Session, error) {
-	browser, l, err := launchBrowser(headless)
+	binPath, ok := launcher.LookPath()
+	if !ok {
+		return nil, errors.New("could not find chrome/chromium executable")
+	}
+	l := launcher.New().
+		Bin(binPath).
+		HeadlessNew(headless).
+		Set("accept-lang", "en-US,en").
+		Set("disable-blink-features", "AutomationControlled")
+	var ownedProfile string
+	if defaults.Dir == "" {
+		ownedProfile = l.Get(flags.UserDataDir)
+	}
+
+	u, err := l.Launch()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("launch browser: %w", err)
+	}
+	browser := rod.New().ControlURL(u).NoDefaultDevice()
+	if err = browser.Connect(); err != nil {
+		l.Kill()
+		return nil, errors.Join(fmt.Errorf("connect browser: %w", err), cleanupProfile(ownedProfile))
 	}
 	return &Session{
-		browser:  browser,
-		launcher: l,
+		browser:      browser,
+		launcher:     l,
+		ownedProfile: ownedProfile,
 	}, nil
 }
 
@@ -67,16 +89,17 @@ func (s *Session) Close() error {
 			// the launcher exit signal, so terminate the process group explicitly
 			// and remove the session-scoped profile without another wait.
 			s.launcher.Kill()
-			s.closeErr = errors.Join(s.closeErr, cleanupProfile(s.launcher))
-		} else {
-			s.closeErr = errors.Join(s.closeErr, closeErr)
 		}
+		s.closeErr = errors.Join(s.closeErr, cleanupProfile(s.ownedProfile))
 	})
 	return s.closeErr
 }
 
-func cleanupProfile(l *launcher.Launcher) error {
-	dir := filepath.Clean(l.Get(flags.UserDataDir))
+func cleanupProfile(path string) error {
+	if path == "" {
+		return nil
+	}
+	dir := filepath.Clean(path)
 	root := filepath.Clean(launcher.DefaultUserDataDirPrefix)
 	if dir == "." || dir == root {
 		return errors.New("refusing to remove the browser data root")
@@ -92,40 +115,26 @@ func cleanupProfile(l *launcher.Launcher) error {
 	return nil
 }
 
-func MustBackgroundPage(b *rod.Browser) *rod.Page {
+// NewBackgroundPage creates a blank page with the configured locale and timezone.
+func NewBackgroundPage(b *rod.Browser) (*rod.Page, error) {
 	page, err := b.Page(proto.TargetCreateTarget{
-		URL:        "",
 		Background: true,
 	})
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	return page
-}
 
-func launchBrowser(headless bool) (*rod.Browser, *launcher.Launcher, error) {
-	binPath, ok := launcher.LookPath()
-	if !ok {
-		return nil, nil, errors.New("could not find chrome/chromium executable")
+	locale := proto.EmulationSetLocaleOverride{Locale: "en_US"}
+	zone := proto.EmulationSetTimezoneOverride{TimezoneID: "America/Los_Angeles"}
+	if err = locale.Call(page); err == nil {
+		err = zone.Call(page)
 	}
-	l := launcher.New().
-		Bin(binPath).
-		HeadlessNew(headless).
-		Set("disable-blink-features", "AutomationControlled")
-	u, err := l.Launch()
 	if err != nil {
-		return nil, nil, fmt.Errorf("launch browser: %w", err)
+		ctx, cancel := context.WithTimeout(context.Background(), browserCloseTimeout)
+		defer cancel()
+		return nil, errors.Join(fmt.Errorf("set browser locale and timezone: %w", err), page.Context(ctx).Close())
 	}
-
-	browser := rod.New().
-		ControlURL(u).
-		NoDefaultDevice()
-	if err = browser.Connect(); err != nil {
-		l.Kill()
-		l.Cleanup()
-		return nil, nil, fmt.Errorf("connect browser: %w", err)
-	}
-	return browser, l, nil
+	return page, nil
 }
 
 // pageURL reads the target URL using the caller's context.

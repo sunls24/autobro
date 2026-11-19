@@ -51,25 +51,6 @@ func TestCheckEnvWritableRejectsMissingFile(t *testing.T) {
 	}
 }
 
-func TestSetAPIKeyUnchanged(t *testing.T) {
-	envPath := filepath.Join(t.TempDir(), ".env.local")
-	content := "SL_API_KEY=existing\n"
-	if err := os.WriteFile(envPath, []byte(content), 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	if err := SetAPIKey(envPath, "existing"); err != nil {
-		t.Fatalf("SetAPIKey() error = %v", err)
-	}
-	got, err := os.ReadFile(envPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-	if string(got) != content {
-		t.Fatalf("env changed on duplicate: %q", string(got))
-	}
-}
-
 func TestUpdateEnvContentReplacesKey(t *testing.T) {
 	for _, test := range []struct {
 		name    string

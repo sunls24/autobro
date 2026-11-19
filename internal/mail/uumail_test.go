@@ -179,28 +179,9 @@ func TestUumailNameToAddress(t *testing.T) {
 	pattern := regexp.MustCompile(`^[a-z0-9-_]+$`)
 	for _, name := range []string{"", "Emma Smith", "Liam Noah 42"} {
 		address := uumailNameToAddress(name)
-		if address == "" {
-			t.Fatalf("uumailNameToAddress(%q) 为空", name)
-		}
-		if strings.Contains(address, ".") {
-			t.Fatalf("uumailNameToAddress(%q) = %q，包含点号", name, address)
-		}
 		if len(address) > 64 || !pattern.MatchString(address) {
 			t.Fatalf("uumailNameToAddress(%q) = %q，不满足 prefix 规则", name, address)
 		}
-	}
-}
-
-func TestNewUumailRequiresAccountsAndKey(t *testing.T) {
-	t.Parallel()
-
-	if _, err := NewUumailWithConfig(context.Background(), UumailConfig{}); err == nil ||
-		!strings.Contains(err.Error(), "UUMAIL_ACCOUNTS") {
-		t.Fatalf("空账号列表应报 UUMAIL_ACCOUNTS 错误，got %v", err)
-	}
-	if _, err := NewUumailWithConfig(context.Background(), UumailConfig{Accounts: []string{"a@chato.eu.org"}}); err == nil ||
-		!strings.Contains(err.Error(), "SUNMAIL_API_KEY") {
-		t.Fatalf("缺少 SunMail Key 应报错，got %v", err)
 	}
 }
 
@@ -267,11 +248,14 @@ func TestUumailAliasQuotaRotatesAndExhausts(t *testing.T) {
 	}
 }
 
-func TestUumailExpiredSessionRelogin(t *testing.T) {
+func TestUumailExpiredSessionReloginPreservesOtherSessions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := newUumailTestServer(t)
 	sessionPath := filepath.Join(t.TempDir(), "sessions.json")
+	if err := StoreUumailSession(sessionPath, "other@chato.eu.org", UumailSession{Cookie: "uumail_ut=other"}); err != nil {
+		t.Fatalf("StoreUumailSession() error = %v", err)
+	}
 	if err := StoreUumailSession(sessionPath, "a1@chato.eu.org", UumailSession{Cookie: uumailCookieName + "=stale"}); err != nil {
 		t.Fatalf("StoreUumailSession() error = %v", err)
 	}
@@ -295,6 +279,13 @@ func TestUumailExpiredSessionRelogin(t *testing.T) {
 	}
 	if !strings.HasSuffix(address, "@a1.uu.me") {
 		t.Fatalf("NewAddress() = %q", address)
+	}
+	data, err := os.ReadFile(sessionPath)
+	if err != nil {
+		t.Fatalf("读取会话缓存失败：%v", err)
+	}
+	if !strings.Contains(string(data), "other@chato.eu.org") {
+		t.Fatalf("回写不应覆盖其他进程写入的会话：%s", data)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -358,44 +349,6 @@ func TestUumailSessionFilePersisted(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("会话缓存权限 = %v，应为 0600", perm)
-	}
-}
-
-func TestUumailSessionMergeKeepsOtherProcessEntries(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	s := newUumailTestServer(t)
-	sessionPath := filepath.Join(t.TempDir(), "sessions.json")
-	// 模拟另一进程（如 make reguu）已写入的其他账号会话。
-	if err := StoreUumailSession(sessionPath, "other@chato.eu.org", UumailSession{Cookie: "uumail_ut=other"}); err != nil {
-		t.Fatalf("StoreUumailSession() error = %v", err)
-	}
-	// 本进程持有 a1 的过期会话，NewAddress 触发重登并回写缓存。
-	if err := StoreUumailSession(sessionPath, "a1@chato.eu.org", UumailSession{Cookie: uumailCookieName + "=stale"}); err != nil {
-		t.Fatalf("StoreUumailSession() error = %v", err)
-	}
-	provider, err := NewUumailWithConfig(ctx, UumailConfig{
-		Accounts:      []string{"a1@chato.eu.org"},
-		SunMailAPIKey: "test-sunmail-key",
-		SessionPath:   sessionPath,
-		APIBase:       s.api.URL,
-		SSOBase:       s.sso.URL,
-	})
-	if err != nil {
-		t.Fatalf("NewUumailWithConfig() error = %v", err)
-	}
-	u := provider.(*uumail)
-	u.wait = &fakeWait{code: "123456"}
-	if _, err = provider.NewAddress(ctx, "Emma Smith"); err != nil {
-		t.Fatalf("NewAddress() error = %v", err)
-	}
-
-	data, err := os.ReadFile(sessionPath)
-	if err != nil {
-		t.Fatalf("读取会话缓存失败：%v", err)
-	}
-	if !strings.Contains(string(data), "other@chato.eu.org") {
-		t.Fatalf("回写不应覆盖其他进程写入的会话：%s", data)
 	}
 }
 

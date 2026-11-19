@@ -23,19 +23,6 @@ func render(event string, level slog.Level, args ...any) string {
 	return formatRecord(record, values, extras)
 }
 
-func TestFormatStepWithProgress(t *testing.T) {
-	got := render("步骤", slog.LevelInfo,
-		slog.String("action", "注册"),
-		slog.String("step", "开始认证"),
-		slog.Int("index", 1),
-		slog.Int("total", 10),
-	)
-	want := "09-11 12:40:00 注册 1/10 ▶ 开始认证"
-	if got != want {
-		t.Fatalf("render() = %q, want %q", got, want)
-	}
-}
-
 // 白名单之外的键必须兜底输出，不能静默丢失（如「可复用」字段）。
 func TestFormatUnknownAttrFallback(t *testing.T) {
 	got := render(eventDebug, slog.LevelDebug,
@@ -100,27 +87,15 @@ func TestFormatBatchWarningSummary(t *testing.T) {
 	}
 }
 
-func TestFormatErrorFlattensNewlines(t *testing.T) {
-	got := render("失败", slog.LevelError,
-		slog.String("action", "程序"),
-		slog.String("step", "运行"),
-		slog.String("err", "第一项\n第二项"),
-	)
-	want := "09-11 12:40:00 程序 ✗ 运行失败，原因：第一项；第二项"
-	if got != want {
-		t.Fatalf("render() = %q, want %q", got, want)
-	}
-}
-
 // 错误可能承载聚合后的多条失败原因，只压成单行、不截断。
 func TestFormatErrorIsFlattenedNotTruncated(t *testing.T) {
 	value := strings.Repeat("a", maxValueLen+50)
 	got := render("失败", slog.LevelError,
 		slog.String("action", "程序"),
 		slog.String("step", "运行"),
-		slog.String("err", value),
+		slog.String("err", "第一项\n"+value),
 	)
-	want := "09-11 12:40:00 程序 ✗ 运行失败，原因：" + value
+	want := "09-11 12:40:00 程序 ✗ 运行失败，原因：第一项；" + value
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
 	}
@@ -157,18 +132,15 @@ func TestFormatDurationIsRounded(t *testing.T) {
 
 // 响应体等长字段必须压成单行并截断，否则会破坏「一行一条」的格式。
 func TestFormatTruncatesAndFlattensBody(t *testing.T) {
-	body := strings.Repeat("a", maxValueLen+50) + "\nsecond line"
+	body := "a\n" + strings.Repeat("b", maxValueLen)
 	got := render("调试", slog.LevelDebug,
 		slog.String("action", "邮箱"),
 		slog.String("step", "创建别名"),
 		slog.String("body", body),
 	)
-	want := "09-11 12:40:00 邮箱 · 创建别名，响应：" + strings.Repeat("a", maxValueLen) + "…"
+	want := "09-11 12:40:00 邮箱 · 创建别名，响应：a；" + strings.Repeat("b", maxValueLen-2) + "…"
 	if got != want {
 		t.Fatalf("render() = %q, want %q", got, want)
-	}
-	if strings.Contains(got, "\n") || strings.Contains(got, "second line") {
-		t.Fatalf("render() = %q, want single line", got)
 	}
 }
 

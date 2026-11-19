@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"testing"
 )
 
@@ -77,8 +76,5 @@ func assertEnvContent(t *testing.T, path, want string) {
 	}
 	if string(data) != want {
 		t.Fatalf("env 内容 = %q，want %q", string(data), want)
-	}
-	if !strings.Contains(string(data), "UUMAIL_ACCOUNTS=") {
-		t.Fatalf("env 内容缺少 UUMAIL_ACCOUNTS：%q", string(data))
 	}
 }

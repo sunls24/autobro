@@ -48,9 +48,7 @@ mail.From(uu, SunMail) ──取码──▶ ChatGPT 注册流程（浏览器/�
 - 单测覆盖：登录链路（含非 JSON 401 归一化、频控重试路径）、过期会话自动重登、
   别名配额轮换/耗尽、创建冲突重试、会话缓存持久化/权限收紧/跨进程合并/并发写入、
   成功响应携带 message 字段不误判、错误响应体截断。
-- 真实链路：`make reguu` 真实注册账号 → `make newuu -c 1` 两次完整 ChatGPT 注册成功；
-  live 冒烟测试（`UUMAIL_LIVE=1 go test -run TestUumailLiveSmoke ./internal/mail/`）覆盖
-  真实登录（OTP 收码）→ 建别名 → 转发解析 → 删除，与 toapi 共用仓库根会话文件。
+- 接入时已验证真实注册流程，以及 Uumail 登录、别名创建、转发地址解析和删除。
 - codex code review 三轮：首轮 6 个 P2 全部修复（权限收紧、先监听后发码、401 归一化、
   索引加锁、锁+原子写缓存、过期重试）；第二轮自查修复 5 项，含 live 冒烟抓到的
   **真实契约 bug：`/v1/addr/delete` 只接受 alias 前缀（@ 前本地部分），传完整地址
@@ -63,4 +61,3 @@ mail.From(uu, SunMail) ──取码──▶ ChatGPT 注册流程（浏览器/�
 - 免费版 3 别名限额未实测（测试号在 Plus 试用内），配额以服务端 `limits` 为准。
 - 验证码邮件主题固定 `Login Verification Code`，6 位码在正文，SunMail 现有提取逻辑兼容。
 - 会话缓存写失败仅告警不中断本次注册（设计决策：代价是下次多一次登录）。
-- live 冒烟测试默认跳过；`UUMAIL_LIVE=1` 时执行，会产生并即时删除一个真实别名。

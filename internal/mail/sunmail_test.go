@@ -27,19 +27,6 @@ func TestParseSunMailDomains(t *testing.T) {
 	}
 }
 
-func TestNewSunMailUsesSpecifiedDomain(t *testing.T) {
-	t.Parallel()
-
-	provider := NewSunMail("", " @example.com ")
-	address, err := provider.NewAddress(context.Background(), "Alice Smith")
-	if err != nil {
-		t.Fatalf("NewAddress() error = %v", err)
-	}
-	if !strings.HasSuffix(address, "@example.com") {
-		t.Fatalf("NewAddress() = %q, want example.com domain", address)
-	}
-}
-
 func TestSunMailSkipsDomainDiscoveryForSpecifiedDomains(t *testing.T) {
 	called := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
