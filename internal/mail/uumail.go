@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/sunls24/gox"
 )
 
@@ -39,6 +40,12 @@ const (
 // ErrUumailSessionExpired 表示会话 cookie 失效，需要重新走邮箱验证码登录。
 var ErrUumailSessionExpired = errors.New("Uumail：会话已过期")
 
+// ErrUumailSessionMissing 表示本地没有该账号的会话缓存。
+var ErrUumailSessionMissing = errors.New("Uumail：该账号缺少已登录的本地会话")
+
+// ErrUumailUnavailable 表示定时任务暂时没有可以创建别名的账号。
+var ErrUumailUnavailable = errors.New("Uumail 暂无可用账号")
+
 // UumailSession 是一个 Uumail 账号（以 SunMail 地址为身份）的会话信息。
 type UumailSession struct {
 	Cookie   string `json:"cookie"` // uumail_ut=...，永不出现在日志
@@ -54,16 +61,43 @@ type UumailUserInfo struct {
 	AliasCount  int64
 	AliasLimits int64 // -1 表示不限
 	Level       string
+
+	aliasQuotaKnown bool // 是否从服务端取得有效配额字段，独立于普通地址池的默认值。
+}
+
+// CheckAliasAvailability 检查会员权益和创建别名所需的配额。
+func (info UumailUserInfo) CheckAliasAvailability() error {
+	switch strings.ToLower(strings.TrimSpace(info.Level)) {
+	case "plus", "pro":
+	case "":
+		return errors.New("Uumail：用户信息缺少会员等级")
+	case "free":
+		return fmt.Errorf("%w：会员权益不可用，服务端等级为 %q", ErrUumailUnavailable, info.Level)
+	default:
+		return fmt.Errorf("Uumail：未识别的会员等级 %q", info.Level)
+	}
+	if !info.aliasQuotaKnown {
+		return errors.New("Uumail：用户信息缺少有效的别名配额字段")
+	}
+	if info.aliasQuotaExhausted() {
+		return fmt.Errorf("%w：别名配额已用尽", ErrUumailUnavailable)
+	}
+	return nil
+}
+
+func (info UumailUserInfo) aliasQuotaExhausted() bool {
+	return info.AliasLimits >= 0 && info.AliasCount >= info.AliasLimits
 }
 
 // UumailConfig 配置 Uumail 地址提供方。APIBase/SSOBase/SessionPath 留空时取默认值。
 type UumailConfig struct {
-	Accounts      []string // SunMail 身份地址池（UUMAIL_ACCOUNTS）
-	SunMailAPIKey string   // 懒登录收码使用
-	SessionPath   string
-	APIBase       string
-	SSOBase       string
-	HTTPClient    *http.Client
+	Accounts          []string // SunMail 身份地址池（UUMAIL_ACCOUNTS）
+	SunMailAPIKey     string   // 懒登录收码使用
+	RequireMembership bool
+	SessionPath       string
+	APIBase           string
+	SSOBase           string
+	HTTPClient        *http.Client
 }
 
 // UumailClient 封装 Uumail 与 Maxthon SSO 的 HTTP 接口；提供方懒登录与注册流程共用。
@@ -317,20 +351,36 @@ func (c *UumailClient) UserInfo(ctx context.Context, cookie string) (UumailUserI
 		}
 	}
 	result, _ := parsed["result"].(map[string]any)
+	aliasCount, countKnown := intField(result, "aliasCount")
 	info := UumailUserInfo{
 		Username:    stringField(result, "name"),
 		Domain:      stringField(result, "domain"),
-		AliasCount:  intField(result, "aliasCount"),
+		AliasCount:  aliasCount,
 		AliasLimits: -1,
 		Level:       stringField(result, "level"),
 	}
 	if limits, ok := result["limits"].(map[string]any); ok {
-		info.AliasLimits = intField(limits, "aliasLimits")
+		var limitKnown bool
+		info.AliasLimits, limitKnown = intField(limits, "aliasLimits")
+		info.aliasQuotaKnown = countKnown && aliasCount >= 0 && limitKnown && info.AliasLimits >= -1
 	}
 	if info.Username == "" || info.Domain == "" {
 		return UumailUserInfo{}, errors.New("Uumail：用户信息缺少用户名或域名")
 	}
 	return info, nil
+}
+
+// CachedUserInfo 使用已登录账号的本地会话查询用户信息。
+func (c *UumailClient) CachedUserInfo(ctx context.Context, sessionPath, email string) (UumailUserInfo, error) {
+	sessions, err := readUumailSessions(UumailSessionPath(sessionPath))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return UumailUserInfo{}, err
+	}
+	session := sessions[email]
+	if strings.TrimSpace(session.Cookie) == "" {
+		return UumailUserInfo{}, ErrUumailSessionMissing
+	}
+	return c.UserInfo(ctx, session.Cookie)
 }
 
 // UpdateProfile 完善首次登录后的资料（用户名 + 转发收件箱）并返回最新资料。
@@ -378,9 +428,10 @@ func stringField(m map[string]any, key string) string {
 	return strings.TrimSpace(value)
 }
 
-func intField(m map[string]any, key string) int64 {
-	value, _ := m[key].(float64)
-	return int64(value)
+func intField(m map[string]any, key string) (int64, bool) {
+	value, ok := m[key].(float64)
+	count := int64(value)
+	return count, ok && float64(count) == value
 }
 
 // uumailNameToAddress 生成 Uumail 别名 prefix：只允许 [a-zA-Z0-9-_]，不允许点号。
@@ -397,13 +448,14 @@ func uumailNameToAddress(name string) string {
 }
 
 type uumail struct {
-	client      *UumailClient
-	accounts    []string
-	index       int
-	sessionPath string
-	sessions    map[string]UumailSession
-	wait        IMailWait
-	mu          sync.Mutex
+	client            *UumailClient
+	accounts          []string
+	requireMembership bool
+	index             int
+	sessionPath       string
+	sessions          map[string]UumailSession
+	wait              IMailWait
+	mu                sync.Mutex
 }
 
 // NewUumailWithConfig 创建 Uumail 地址提供方；会话缓存懒加载自 SessionPath。
@@ -416,16 +468,23 @@ func NewUumailWithConfig(ctx context.Context, config UumailConfig) (IMailAddress
 		}
 	}
 	if len(accounts) == 0 {
+		if config.RequireMembership {
+			return nil, fmt.Errorf("%w：UUMAIL_ACCOUNTS 为空", ErrUumailUnavailable)
+		}
 		return nil, errors.New("Uumail：UUMAIL_ACCOUNTS 为空，请先运行 make reguu 注册账号")
+	}
+	if config.RequireMembership && len(accounts) != 1 {
+		return nil, errors.New("Uumail：请在 UUMAIL_ACCOUNTS 中配置一个具有有效会员权益的账号")
 	}
 	if strings.TrimSpace(config.SunMailAPIKey) == "" {
 		return nil, errors.New("Uumail：SUNMAIL_API_KEY 为空，无法懒登录收取验证码")
 	}
 	provider := &uumail{
-		client:      NewUumailClient(config.APIBase, config.SSOBase, config.HTTPClient),
-		accounts:    accounts,
-		sessionPath: defaultOr(config.SessionPath, defaultUumailSessionPath),
-		sessions:    map[string]UumailSession{},
+		client:            NewUumailClient(config.APIBase, config.SSOBase, config.HTTPClient),
+		accounts:          accounts,
+		requireMembership: config.RequireMembership,
+		sessionPath:       UumailSessionPath(config.SessionPath),
+		sessions:          map[string]UumailSession{},
 		wait: NewSunMailWithConfig(SunMailConfig{
 			APIKey:     config.SunMailAPIKey,
 			HTTPClient: config.HTTPClient,
@@ -435,45 +494,80 @@ func NewUumailWithConfig(ctx context.Context, config UumailConfig) (IMailAddress
 	return provider, nil
 }
 
-// loadSessions 读取会话缓存文件；文件缺失或损坏时按空处理。
-func (u *uumail) loadSessions() {
-	data, err := os.ReadFile(u.sessionPath)
+func readUumailSessions(path string) (map[string]UumailSession, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			logMailWarning("Uumail", "会话缓存读取失败，按空处理", slog.String("path", u.sessionPath), slog.Any("err", err))
-		}
-		return
+		return nil, err
 	}
 	sessions := map[string]UumailSession{}
 	if err := json.Unmarshal(data, &sessions); err != nil {
-		logMailWarning("Uumail", "会话缓存解析失败，按空处理",
-			slog.String("path", u.sessionPath), slog.Any("err", err))
-		return
+		return nil, fmt.Errorf("解析 Uumail 会话缓存：%w", err)
 	}
-	u.sessions = sessions
-	logMailDebug("Uumail", "会话缓存已加载", slog.Int("count", len(sessions)))
+	return sessions, nil
 }
 
-func (u *uumail) saveSessions() error {
-	return writeUumailSessions(u.sessionPath, u.sessions)
+func UumailSessionPath(path string) string {
+	return defaultOr(path, defaultUumailSessionPath)
 }
 
-// writeUumailSessions 以"独占锁 + 临时文件 rename"原子更新会话缓存：
-// 先合并磁盘上其他进程写入的条目（含注册流程新增账号），再整体替换，
-// 避免丢失更新或让读者看到半截内容；Chmod 保证权限收紧为 0600。
-func writeUumailSessions(path string, overlay map[string]UumailSession) error {
-	release, err := lockUumailSessions(path)
+func CheckUumailSessions(path string) error {
+	path = UumailSessionPath(path)
+	lock, err := lockUumailSessions(path)
 	if err != nil {
 		return err
 	}
-	defer release()
-
-	sessions := map[string]UumailSession{}
-	if data, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(data, &sessions)
+	defer lock.Close()
+	if _, err := readUumailSessions(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	for email, session := range overlay {
-		sessions[email] = session
+	temp, err := os.CreateTemp(filepath.Dir(path), ".uumail-sessions-*.tmp")
+	if err != nil {
+		return err
+	}
+	return errors.Join(temp.Close(), os.Remove(temp.Name()))
+}
+
+func HasUumailSession(path, email, username string) (bool, error) {
+	sessions, err := readUumailSessions(UumailSessionPath(path))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	session := sessions[email]
+	return session.Cookie != "" && (username == "" || strings.EqualFold(session.Username, username)), err
+}
+
+// loadSessions 读取会话缓存文件；文件缺失或损坏时按空处理。
+func (u *uumail) loadSessions() {
+	sessions, err := readUumailSessions(u.sessionPath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logMailWarning("Uumail", "会话缓存加载失败，按空处理", slog.String("path", u.sessionPath), slog.Any("err", err))
+		}
+		return
+	}
+	if sessions != nil {
+		u.sessions = sessions
+	}
+	logMailDebug("Uumail", "会话缓存已加载", slog.Int("count", len(sessions)))
+}
+
+func updateUumailSessions(path string, update func(map[string]UumailSession) bool) error {
+	path = UumailSessionPath(path)
+	lock, err := lockUumailSessions(path)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+
+	sessions, err := readUumailSessions(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if sessions == nil {
+		sessions = make(map[string]UumailSession)
+	}
+	if !update(sessions) {
+		return nil
 	}
 	encoded, err := json.MarshalIndent(sessions, "", "  ")
 	if err != nil {
@@ -502,87 +596,98 @@ func writeUumailSessions(path string, overlay map[string]UumailSession) error {
 	return nil
 }
 
-// lockUumailSessions 用独占锁文件串行化跨进程的会话缓存更新；
-// 锁文件超过 1 分钟视为进程残留，直接接管。返回释放函数。
-func lockUumailSessions(path string) (func(), error) {
-	lockPath := path + ".lock"
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
-			_, _ = file.WriteString(strconv.Itoa(os.Getpid()))
-			_ = file.Close()
-			return func() { _ = os.Remove(lockPath) }, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("Uumail：创建会话缓存锁失败：%w", err)
-		}
-		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > time.Minute {
-			_ = os.Remove(lockPath)
-			continue
-		}
-		if time.Now().After(deadline) {
-			return nil, errors.New("Uumail：等待会话缓存锁超时")
-		}
-		time.Sleep(50 * time.Millisecond)
+// 锁文件保留在稳定路径，保证每个进程锁定同一个文件。
+func lockUumailSessions(path string) (*flock.Flock, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	lock := flock.New(path + ".lock")
+	if _, err := lock.TryLockContext(ctx, 50*time.Millisecond); err != nil {
+		return nil, fmt.Errorf("Uumail：获取会话缓存锁失败：%w", err)
 	}
+	return lock, nil
 }
 
 // StoreUumailSession 把一个账号的会话写入缓存文件（注册流程与提供方共用）。
 func StoreUumailSession(path, email string, session UumailSession) error {
 	session.SavedAt = time.Now().Unix()
-	return writeUumailSessions(defaultOr(path, defaultUumailSessionPath),
-		map[string]UumailSession{strings.ToLower(strings.TrimSpace(email)): session})
+	return updateUumailSessions(path, func(sessions map[string]UumailSession) bool {
+		sessions[strings.ToLower(strings.TrimSpace(email))] = session
+		return true
+	})
 }
 
-// ensureSession 返回可用会话：优先缓存，cookie 缺失时走邮箱验证码登录。
-func (u *uumail) ensureSession(ctx context.Context, email string) (UumailSession, error) {
+func RetireUumailSessions(path string, accounts []string, current string) error {
+	return updateUumailSessions(path, func(sessions map[string]UumailSession) bool {
+		changed := false
+		for _, account := range accounts {
+			email := strings.ToLower(strings.TrimSpace(account))
+			session := sessions[email]
+			if email != current && session.Cookie != "" {
+				session.Cookie = ""
+				sessions[email] = session
+				changed = true
+			}
+		}
+		return changed
+	})
+}
+
+// ensureSession 返回可用会话，以及本次登录时查询到的用户信息（若有）。
+func (u *uumail) ensureSession(ctx context.Context, email string) (UumailSession, *UumailUserInfo, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	session, ok := u.sessions[email]
 	if ok && strings.TrimSpace(session.Cookie) != "" {
-		return session, nil
+		return session, nil, nil
 	}
 	logMailStep("Uumail", "登录账号", slogEmail(email))
 	cookie, err := u.client.LoginByEmail(ctx, email, u.wait)
 	if err != nil {
-		return UumailSession{}, err
+		return UumailSession{}, nil, err
 	}
 	info, err := u.client.UserInfo(ctx, cookie)
 	if err != nil {
-		return UumailSession{}, err
+		return UumailSession{}, nil, err
 	}
-	session = UumailSession{Cookie: cookie, Username: info.Username, Domain: info.Domain}
+	session = UumailSession{Cookie: cookie, Username: info.Username, Domain: info.Domain, SavedAt: time.Now().Unix()}
 	u.sessions[email] = session
-	if err := u.saveSessions(); err != nil {
+	if err := updateUumailSessions(u.sessionPath, func(sessions map[string]UumailSession) bool {
+		if disk, exists := sessions[email]; exists && disk.Cookie == "" {
+			return false
+		}
+		sessions[email] = session
+		return true
+	}); err != nil {
 		logMailWarning("Uumail", "会话缓存写入失败", slogEmail(email), slog.Any("err", err))
 	}
-	return session, nil
+	return session, &info, nil
 }
 
 // refreshSession 校验并刷新会话，返回最新用户信息；失效时自动重登一次。
 func (u *uumail) refreshSession(ctx context.Context, email string) (UumailSession, UumailUserInfo, error) {
-	session, err := u.ensureSession(ctx, email)
-	if err != nil {
-		return UumailSession{}, UumailUserInfo{}, err
-	}
-	info, err := u.client.UserInfo(ctx, session.Cookie)
-	if errors.Is(err, ErrUumailSessionExpired) {
-		u.forgetSession(email)
-		if session, err = u.ensureSession(ctx, email); err != nil {
+	for attempt := 0; ; attempt++ {
+		session, freshInfo, err := u.ensureSession(ctx, email)
+		if err != nil {
 			return UumailSession{}, UumailUserInfo{}, err
 		}
-		if info, err = u.client.UserInfo(ctx, session.Cookie); err != nil {
+		if freshInfo != nil {
+			return session, *freshInfo, nil
+		}
+		info, err := u.client.UserInfo(ctx, session.Cookie)
+		if attempt == 0 && errors.Is(err, ErrUumailSessionExpired) {
+			u.forgetSession(email)
+			continue
+		}
+		if err != nil {
 			return UumailSession{}, UumailUserInfo{}, err
 		}
-	} else if err != nil {
-		return UumailSession{}, UumailUserInfo{}, err
+		session.Username, session.Domain = info.Username, info.Domain
+		u.mu.Lock()
+		u.sessions[email] = session
+		u.mu.Unlock()
+		return session, info, nil
 	}
-	session.Username, session.Domain = info.Username, info.Domain
-	u.mu.Lock()
-	u.sessions[email] = session
-	u.mu.Unlock()
-	return session, info, nil
 }
 
 func (u *uumail) forgetSession(email string) {
@@ -593,7 +698,7 @@ func (u *uumail) forgetSession(email string) {
 
 // withSession 用账号会话执行 fn；会话失效时重登一次后重试。
 func (u *uumail) withSession(ctx context.Context, email string, fn func(session UumailSession) error) error {
-	session, err := u.ensureSession(ctx, email)
+	session, _, err := u.ensureSession(ctx, email)
 	if err != nil {
 		return err
 	}
@@ -602,7 +707,7 @@ func (u *uumail) withSession(ctx context.Context, email string, fn func(session 
 		return err
 	}
 	u.forgetSession(email)
-	if session, err = u.ensureSession(ctx, email); err != nil {
+	if session, _, err = u.ensureSession(ctx, email); err != nil {
 		return err
 	}
 	return fn(session)
@@ -645,7 +750,11 @@ func (u *uumail) NewAddress(ctx context.Context, name string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if info.AliasLimits >= 0 && info.AliasCount >= info.AliasLimits {
+		if u.requireMembership {
+			if err := info.CheckAliasAvailability(); err != nil {
+				return "", err
+			}
+		} else if info.aliasQuotaExhausted() {
 			logMailWarning("Uumail", "账号别名配额已用尽，轮换下一账号",
 				slogEmail(email), slog.Int64("limit", info.AliasLimits))
 			u.rotate()
@@ -674,7 +783,7 @@ func (u *uumail) createAliasWithRetry(ctx context.Context, email, name string) (
 	var lastErr error
 	expiredRetried := false
 	for attempt := 0; attempt < uumailAliasMaxRetries; attempt++ {
-		session, err := u.ensureSession(ctx, email)
+		session, _, err := u.ensureSession(ctx, email)
 		if err != nil {
 			return "", err
 		}

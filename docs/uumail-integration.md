@@ -4,8 +4,15 @@
 
 ```bash
 make reguu                # 注册 1 个 Uumail 账号（SunMail 地址作身份），自动更新 .env.local
+make reguu ARGS=-prepare  # 为定时任务准备候选账号，只保存本地会话
+make reguu ARGS=-ensure   # 当前账号缺失、权益失效或配额耗尽时注册并替换
+make useuu UU_EMAIL=邮箱   # 验证已登录的账号并将 UUMAIL_ACCOUNTS 改为单条
 make newuu ARGS="-c 4"    # 用 uu provider 批量注册 ChatGPT 账号（不带 ARGS 默认 -c 4）
 ```
+
+普通 `reguu` 在验证新账号的会员权益和配额后，把 `UUMAIL_ACCOUNTS` 原子替换为这一条账号。定时任务使用 `-ensure`，当前账号可用时直接复用，缺失、权益失效或配额耗尽时才注册并替换。`-prepare` 会保留候选会话但不改配置，之后可用 `useuu` 手动验证并切换。
+
+`UUMAIL_ACCOUNTS` 直接填写邮箱，已有多个邮箱时用逗号分隔。注册前检查配置锁、会话缓存及其目录的写入条件。验证会员和配额后，将候选邮箱和服务端确认的用户名写入 `.uu-retire`，再保存新会话。核对当前账号配置后提交切换，并清除旧账号的登录 cookie，保留邮箱与别名域名的对应关系。中断后从切换记录恢复已保存会话的配置提交和清理。会话尚未保存时，下轮可选新候选。使用同一环境文件的 UU 注册和切换命令互斥。
 
 ## 架构
 

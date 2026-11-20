@@ -69,6 +69,7 @@ func run() (err error) {
 	count := flag.Int("c", 10, "注册数量；续期模式下为重新登录尝试上限，省略则不限")
 	protocolMode := flag.Bool("p", false, "使用协议混合认证；默认使用浏览器")
 	mailProvider := flag.String("m", mail.AddressProviderSunMail, "邮箱地址实现: sun, sl, mm 或 uu")
+	uuMembership := flag.Bool("uu-membership", false, "新注册时要求配置单个具有有效会员权益的 UU 账号")
 	sunMailDomains := flag.String("d", "", "SunMail 域名后缀，多个用逗号分隔")
 	renew := flag.Bool("r", false, "更新需要重新登录的账号")
 	saveAccounts := &optionalBool{}
@@ -79,6 +80,9 @@ func run() (err error) {
 		logging.Configure(slog.LevelDebug)
 	}
 	provider := mail.NormalizeAddressProvider(*mailProvider)
+	if *uuMembership && (provider != mail.AddressProviderUumail || *renew) {
+		return errors.New("-uu-membership 仅适用于 -m uu 新注册")
+	}
 	storeAccounts := provider == mail.AddressProviderSimpleLogin || provider == mail.AddressProviderUumail
 	if saveAccounts.set {
 		storeAccounts = saveAccounts.value
@@ -95,13 +99,18 @@ func run() (err error) {
 	defer stop()
 
 	address, err := mail.NewAddressProvider(ctx, provider, mail.AddressProviderConfig{
-		SLAPIKeys:            cfg.SLAPIKeys,
-		SunMailAPIKey:        cfg.SunMailAPIKey,
-		SunMailDomains:       domains,
-		ManyMeUsername:       cfg.ManyMeUsername,
-		ManyMeForwardAddress: cfg.ManyMeForwardAddress,
-		UumailAccounts:       cfg.UumailAccounts,
+		SLAPIKeys:               cfg.SLAPIKeys,
+		SunMailAPIKey:           cfg.SunMailAPIKey,
+		SunMailDomains:          domains,
+		ManyMeUsername:          cfg.ManyMeUsername,
+		ManyMeForwardAddress:    cfg.ManyMeForwardAddress,
+		UumailAccounts:          cfg.UumailAccounts,
+		RequireUumailMembership: *uuMembership,
 	})
+	if errors.Is(err, mail.ErrUumailUnavailable) {
+		logging.Skip("注册", "UU", slog.Any("err", err))
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("初始化邮箱服务失败: %w", err)
 	}

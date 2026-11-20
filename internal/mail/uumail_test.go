@@ -44,8 +44,10 @@ type uumailTestServer struct {
 	api *httptest.Server
 
 	mu          sync.Mutex
+	level       string
 	aliasLimits int64
 	logins      int
+	infoCalls   int
 	createCalls int
 	created     []string // "cookie|prefix"
 	deleted     []string // "cookie|email"
@@ -55,7 +57,7 @@ type uumailTestServer struct {
 
 func newUumailTestServer(t *testing.T) *uumailTestServer {
 	t.Helper()
-	s := &uumailTestServer{counts: map[string]int64{}, aliasLimits: -1}
+	s := &uumailTestServer{counts: map[string]int64{}, level: "plus", aliasLimits: -1}
 	s.sso = httptest.NewServer(http.HandlerFunc(s.handleSSO))
 	s.api = httptest.NewServer(http.HandlerFunc(s.handleAPI))
 	t.Cleanup(func() {
@@ -94,6 +96,9 @@ func (s *uumailTestServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{Name: uumailCookieName, Value: "tok-" + ottEmail, Path: "/"})
 		_, _ = w.Write([]byte(`{"result":{"uid":42}}`))
 	case "/v1/user/info":
+		s.mu.Lock()
+		s.infoCalls++
+		s.mu.Unlock()
 		if cookie == uumailCookieName+"=stale" {
 			// 故意返回非 JSON 文本，覆盖 401 响应体无法解析时的归一化路径。
 			w.WriteHeader(http.StatusUnauthorized)
@@ -103,9 +108,10 @@ func (s *uumailTestServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		count := s.counts[username]
 		limits := s.aliasLimits
+		level := s.level
 		s.mu.Unlock()
-		_, _ = fmt.Fprintf(w, `{"code":0,"result":{"name":%q,"domain":"uu.me","aliasCount":%d,"level":"plus","limits":{"aliasLimits":%d,"dailylimits":100}}}`,
-			username, count, limits)
+		_, _ = fmt.Fprintf(w, `{"code":0,"result":{"name":%q,"domain":"uu.me","aliasCount":%d,"level":%q,"limits":{"aliasLimits":%d,"dailylimits":100}}}`,
+			username, count, level, limits)
 	case "/v1/addr/update":
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -248,6 +254,49 @@ func TestUumailAliasQuotaRotatesAndExhausts(t *testing.T) {
 	}
 }
 
+func TestUumailNewAddressRequiresMembership(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newUumailTestServer(t)
+	config := UumailConfig{
+		Accounts:          []string{"a1@example.com"},
+		SunMailAPIKey:     "test-sunmail-key",
+		RequireMembership: true,
+		SessionPath:       filepath.Join(t.TempDir(), "sessions.json"),
+		APIBase:           s.api.URL,
+	}
+	if err := StoreUumailSession(config.SessionPath, config.Accounts[0], UumailSession{
+		Cookie: uumailCookieName + "=tok-a1@example.com",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := NewUumailWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.level = "free"
+	s.aliasLimits = 1
+	s.mu.Unlock()
+	if _, err := provider.NewAddress(ctx, "Emma Smith"); !errors.Is(err, ErrUumailUnavailable) {
+		t.Fatalf("免费账号应在创建别名前报错，got %v", err)
+	}
+	s.mu.Lock()
+	s.level = "plus"
+	s.mu.Unlock()
+	if _, err := provider.NewAddress(ctx, "Emma Smith"); err != nil {
+		t.Fatalf("有效会员应能创建别名，got %v", err)
+	}
+	if _, err := provider.NewAddress(ctx, "Emma Smith"); !errors.Is(err, ErrUumailUnavailable) {
+		t.Fatalf("配额不足应在创建别名前报错，got %v", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.createCalls != 1 {
+		t.Fatalf("创建别名调用次数 = %d，want 1", s.createCalls)
+	}
+}
+
 func TestUumailExpiredSessionReloginPreservesOtherSessions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -291,6 +340,9 @@ func TestUumailExpiredSessionReloginPreservesOtherSessions(t *testing.T) {
 	defer s.mu.Unlock()
 	if s.logins != 1 {
 		t.Fatalf("过期会话应触发一次重登，logins = %d", s.logins)
+	}
+	if s.infoCalls != 2 {
+		t.Fatalf("应仅查询一次过期会话和一次新会话，infoCalls = %d", s.infoCalls)
 	}
 }
 

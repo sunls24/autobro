@@ -11,6 +11,7 @@ import (
 
 	"autobro/internal/chatgpt"
 	"autobro/internal/logging"
+	"autobro/internal/mail"
 	"autobro/internal/scenemint"
 )
 
@@ -104,6 +105,10 @@ func (w *Worker) Start(ctx context.Context, count int) error {
 					logging.Failure("注册", "保存待核对账号", pendingSaveErr, slog.String("file", pendingAccountsFile))
 				}
 				return errors.Join(ctxErr, err)
+			}
+			if errors.Is(err, mail.ErrUumailUnavailable) {
+				logging.Skip("注册", "UU", slog.Any("err", err))
+				return errors.Join(failures...)
 			}
 			if attempt == maxRegistrationAttempts || !retryableRegistrationError(state.account, err) {
 				// 账号级失败：具体环节由原因文本给出（认证步骤、保存账号或上传 SceneMint），

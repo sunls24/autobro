@@ -8,10 +8,10 @@ SOURCE_DIRS := $(sort . $(shell find cmd internal -type d))
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build relog new newsl newslv regsl regslv reguu reguuv newuu
+.PHONY: help build relog new newsl newslv regsl regslv reguu reguuv useuu newuu
 
 help: ## 显示帮助信息
-	@awk 'BEGIN {FS = ":.*##"; printf "用法:\n  make <目标>\n  make <目标> ARGS=\"...\"\n\n目标:\n"} /^[a-zA-Z0-9_.-]+:.*##/ {printf "  %-10s %s\n", $$1, $$2} END {printf "\n示例:\n  make relog N=5\n  make new ARGS=\"-c 1 -m sl\"\n  make newslv\n  make regslv\n  make reguu\n  make newuu ARGS=\"-c 2\"\n"}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*##"; printf "用法:\n  make <目标>\n  make <目标> ARGS=\"...\"\n\n目标:\n"} /^[a-zA-Z0-9_.-]+:.*##/ {printf "  %-10s %s\n", $$1, $$2} END {printf "\n示例:\n  make relog N=5\n  make new ARGS=\"-c 1 -m sl\"\n  make newslv\n  make regslv\n  make reguu ARGS=-ensure\n  make newuu ARGS=\"-c 2\"\n"}' $(MAKEFILE_LIST)
 
 build: $(BINARY) $(SLREGISTER_BINARY) $(UUMAILREGISTER_BINARY) ## 构建程序
 
@@ -51,11 +51,16 @@ regsl: $(SLREGISTER_BINARY) ## 注册 SimpleLogin，可通过 ARGS 传递参数
 regslv: $(SLREGISTER_BINARY) ## 注册 SimpleLogin并输出详细日志
 	set -e; set -a; . "$(ENV_FILE)"; set +a; "./$(SLREGISTER_BINARY)" -v -env "$(ENV_FILE)"
 
-reguu: $(UUMAILREGISTER_BINARY) ## 注册 Uumail 账号并更新 env，可通过 ARGS 传递参数
+reguu: $(UUMAILREGISTER_BINARY) ## 注册或确保 Uumail 账号，可通过 ARGS 传递参数
 	set -e; set -a; . "$(ENV_FILE)"; set +a; "./$(UUMAILREGISTER_BINARY)" -env "$(ENV_FILE)" $(ARGS)
 
 reguuv: $(UUMAILREGISTER_BINARY) ## 注册 Uumail 账号并输出详细日志
 	set -e; set -a; . "$(ENV_FILE)"; set +a; "./$(UUMAILREGISTER_BINARY)" -v -env "$(ENV_FILE)"
+
+unexport UU_EMAIL
+useuu: export AUTOBRO_UUMAIL_EMAIL := $(value UU_EMAIL)
+useuu: $(UUMAILREGISTER_BINARY) ## 验证已登录的 UU 账号并替换当前配置，使用 UU_EMAIL 指定邮箱
+	"./$(UUMAILREGISTER_BINARY)" -env "$(ENV_FILE)" -use "$$AUTOBRO_UUMAIL_EMAIL"
 
 newuu: $(BINARY) ## 使用 Uumail 创建 4 个新任务，ARGS 可覆盖参数
 	set -e; set -a; . "$(ENV_FILE)"; set +a; "./$(BINARY)" -m uu -c 4 $(ARGS)
