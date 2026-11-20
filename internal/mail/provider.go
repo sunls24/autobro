@@ -14,12 +14,13 @@ const (
 )
 
 type AddressProviderConfig struct {
-	SLAPIKeys            []string
-	SunMailAPIKey        string
-	SunMailDomains       []string
-	ManyMeUsername       string
-	ManyMeForwardAddress string
-	UumailAccounts       []string
+	SLAPIKeys               []string
+	SunMailAPIKey           string
+	SunMailDomains          []string
+	ManyMeUsername          string
+	ManyMeForwardAddress    string
+	UumailAccounts          []string
+	RequireUumailMembership bool
 }
 
 func NewAddressProvider(ctx context.Context, provider string, cfg AddressProviderConfig) (IMailAddress, error) {
@@ -32,8 +33,9 @@ func NewAddressProvider(ctx context.Context, provider string, cfg AddressProvide
 		return NewManyMe(cfg.ManyMeUsername, cfg.ManyMeForwardAddress)
 	case AddressProviderUumail:
 		return NewUumailWithConfig(ctx, UumailConfig{
-			Accounts:      cfg.UumailAccounts,
-			SunMailAPIKey: cfg.SunMailAPIKey,
+			Accounts:          cfg.UumailAccounts,
+			SunMailAPIKey:     cfg.SunMailAPIKey,
+			RequireMembership: cfg.RequireUumailMembership,
 		})
 	default:
 		return nil, fmt.Errorf(

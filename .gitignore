@@ -10,6 +10,9 @@ accounts.pending.jsonl
 /auto/logs/
 /auto/autosl.count
 /auto/autosl.count.tmp.*
+/auto/autosl.channel
+/auto/autosl.channel.tmp.*
+/auto/autosl.lock
 uumail_sessions.json
 uumail_sessions.json.lock
 .uumail-sessions-*.tmp

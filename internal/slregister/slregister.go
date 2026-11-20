@@ -10,11 +10,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
+	"autobro/internal/envfile"
 	"autobro/internal/logging"
 	"autobro/internal/mail"
 	"github.com/sunls24/gox"
@@ -24,7 +23,6 @@ const (
 	defaultSimpleLoginBase     = "https://app.simplelogin.io/api"
 	registrationPasswordLength = 24
 	maxResponseBodySize        = 1 << 20
-	envTempPattern             = ".env.local.*.tmp"
 )
 
 const registrationSunMailDomain = "chato.eu.org"
@@ -65,7 +63,7 @@ func Register(ctx context.Context, options Options) (Result, error) {
 	if strings.TrimSpace(options.EnvPath) == "" {
 		return Result{}, errors.New("SimpleLogin 注册失败：.env.local 路径为空")
 	}
-	if err := checkEnvWritable(options.EnvPath); err != nil {
+	if err := envfile.CheckWritable(options.EnvPath); err != nil {
 		return Result{}, fmt.Errorf("检查 %s 写入能力失败：%w", options.EnvPath, err)
 	}
 
@@ -264,122 +262,11 @@ func normalizeBaseURL(value, fallback string) string {
 	return strings.TrimRight(value, "/")
 }
 
-func checkEnvWritable(envPath string) error {
-	file, err := os.Open(envPath)
-	if err != nil {
-		return err
-	}
-	info, statErr := file.Stat()
-	closeErr := file.Close()
-	if statErr != nil {
-		return statErr
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	if !info.Mode().IsRegular() {
-		return errors.New("环境文件不是普通文件")
-	}
-
-	temp, err := os.CreateTemp(filepath.Dir(envPath), envTempPattern)
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	if err := temp.Close(); err != nil {
-		_ = os.Remove(tempPath)
-		return err
-	}
-	return os.Remove(tempPath)
-}
-
 // SetAPIKey replaces SL_API_KEY in envPath with the new account key.
 func SetAPIKey(envPath, apiKey string) error {
 	apiKey = strings.TrimSpace(apiKey)
 	if apiKey == "" || strings.ContainsAny(apiKey, ",\r\n") {
 		return errors.New("invalid SimpleLogin API Key")
 	}
-	content, err := os.ReadFile(envPath)
-	if err != nil {
-		return err
-	}
-	updated := updateEnvContent(string(content), apiKey)
-	if updated == string(content) {
-		return nil
-	}
-	info, err := os.Stat(envPath)
-	if err != nil {
-		return err
-	}
-	dir := filepath.Dir(envPath)
-	temp, err := os.CreateTemp(dir, envTempPattern)
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
-	if err := temp.Chmod(info.Mode().Perm()); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if _, err := temp.WriteString(updated); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, envPath); err != nil {
-		return err
-	}
-	return nil
-}
-
-func updateEnvContent(content, apiKey string) string {
-	lines := strings.SplitAfter(content, "\n")
-	matched := -1
-	var matchedPrefix string
-	var matchedEnding string
-	for index, line := range lines {
-		body, ending := splitLineEnding(line)
-		leadingLength := len(body) - len(strings.TrimLeft(body, " \t"))
-		leading := body[:leadingLength]
-		trimmed := body[leadingLength:]
-		exportPrefix := ""
-		if strings.HasPrefix(trimmed, "export ") {
-			exportPrefix = "export "
-			trimmed = strings.TrimPrefix(trimmed, exportPrefix)
-		}
-		if !strings.HasPrefix(trimmed, "SL_API_KEY=") {
-			continue
-		}
-		matched = index
-		matchedPrefix = leading + exportPrefix + "SL_API_KEY="
-		matchedEnding = ending
-	}
-	if matched >= 0 {
-		lines[matched] = matchedPrefix + apiKey + matchedEnding
-		return strings.Join(lines, "")
-	}
-
-	updated := content
-	if updated != "" && !strings.HasSuffix(updated, "\n") {
-		updated += "\n"
-	}
-	updated += "SL_API_KEY=" + apiKey + "\n"
-	return updated
-}
-
-func splitLineEnding(line string) (string, string) {
-	if strings.HasSuffix(line, "\r\n") {
-		return strings.TrimSuffix(line, "\r\n"), "\r\n"
-	}
-	if strings.HasSuffix(line, "\n") {
-		return strings.TrimSuffix(line, "\n"), "\n"
-	}
-	return line, ""
+	return envfile.Update(envPath, "SL_API_KEY", apiKey)
 }

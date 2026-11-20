@@ -3,6 +3,7 @@ package toapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"autobro/internal/chatgpt"
+	"autobro/internal/mail"
 	"autobro/internal/scenemint"
 )
 
@@ -364,6 +366,19 @@ type registrationTestFunc func(context.Context, *chatgpt.Account) (*chatgpt.Acco
 
 func (f registrationTestFunc) RegisterOrLogin(ctx context.Context, account *chatgpt.Account) (*chatgpt.Account, error) {
 	return f(ctx, account)
+}
+
+func TestStartSkipsUnavailableUumail(t *testing.T) {
+	var attempts int
+	worker := New(func() (chatgpt.Authenticator, func() error, error) {
+		attempts++
+		return registrationTestFunc(func(context.Context, *chatgpt.Account) (*chatgpt.Account, error) {
+			return nil, fmt.Errorf("创建邮箱地址：%w", mail.ErrUumailUnavailable)
+		}), func() error { return nil }, nil
+	}, nil, false)
+	if err := worker.Start(context.Background(), 2); err != nil || attempts != 1 {
+		t.Fatalf("Start() error = %v, attempts = %d; want nil and one check", err, attempts)
+	}
 }
 
 func TestStartPreservesErrorWhenCanceledBetweenAttempts(t *testing.T) {

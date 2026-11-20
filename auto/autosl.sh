@@ -6,7 +6,10 @@ PROJECT_DIR="$(cd -- "$AUTO_DIR/.." && pwd)"
 LOG_DIR="$AUTO_DIR/logs"
 LOG_FILE="$LOG_DIR/autosl-$(date '+%Y-%m-%d').log"
 STATE_FILE="$AUTO_DIR/autosl.count"
+CHANNEL_FILE="$AUTO_DIR/autosl.channel"
+LOCK_FILE="$AUTO_DIR/autosl.lock"
 ROTATE_AFTER=3
+channels=(uu uu uu sl)
 
 umask 077
 mkdir -p "$LOG_DIR"
@@ -15,6 +18,13 @@ chmod 600 "$LOG_FILE"
 
 # 统一收集脚本、make 和 Go 程序的标准输出与错误输出。
 exec >>"$LOG_FILE" 2>&1
+
+zmodload zsh/system
+: >>"$LOCK_FILE"
+if ! zsystem flock -t 0 "$LOCK_FILE"; then
+  print "定时任务已有实例在运行，本次跳过"
+  exit 0
+fi
 
 # 删除最后修改时间超过 7 天的定时任务日志。
 find "$LOG_DIR" -type f -name 'autosl-*.log' -mmin +10080 -delete
@@ -44,10 +54,11 @@ run_make() {
   fi
 }
 
-save_count() {
+save_state() {
+  local state_path="$1" value="$2"
   local tmp_file
-  tmp_file="$(mktemp "$STATE_FILE.tmp.XXXXXX")"
-  if print -r -- "$count" > "$tmp_file" && mv "$tmp_file" "$STATE_FILE"; then
+  tmp_file="$(mktemp "$state_path.tmp.XXXXXX")"
+  if print -r -- "$value" > "$tmp_file" && mv "$tmp_file" "$state_path"; then
     return 0
   else
     rm -f "$tmp_file"
@@ -59,6 +70,24 @@ save_count() {
 set +e
 (
   set -e
+
+  slot=1
+  if [[ -e "$CHANNEL_FILE" ]]; then
+    slot="$(cat "$CHANNEL_FILE")"
+    case "$slot" in
+      [1-4]) ;;
+      *) print -u2 "无效的渠道位置：$CHANNEL_FILE"; exit 1 ;;
+    esac
+  fi
+
+  channel="${channels[$slot]}"
+  save_state "$CHANNEL_FILE" "$((slot % ${#channels} + 1))"
+  print "本轮渠道：$channel（$slot/${#channels}）"
+  if [[ "$channel" == uu ]]; then
+    run_make reguu 'ARGS=-v -ensure'
+    run_make newuu 'ARGS=-v -c 1 -uu-membership'
+    exit 0
+  fi
 
   # 无状态时开启新一轮；损坏的状态必须报错，不能默默换号。
   count="$ROTATE_AFTER"
@@ -73,12 +102,12 @@ set +e
   if (( count >= ROTATE_AFTER )); then
     run_make regslv
     count=0
-    save_count
+    save_state "$STATE_FILE" "$count"
   fi
 
   # 执行前计数，失败或中断也占用一次；每个 make 目标重新加载配置。
   count=$((count + 1))
-  save_count
+  save_state "$STATE_FILE" "$count"
   print "本轮 SL 第 $count/$ROTATE_AFTER 次 new"
   run_make new 'ARGS=-v -m sl -c 1'
 )

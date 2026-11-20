@@ -13,6 +13,7 @@ LABEL="com.autobro.autosl"
 DOMAIN="gui/$(id -u)"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$PLIST_DIR/$LABEL.plist"
+START_INTERVAL=21600
 
 [[ -f "$AUTOSL_PATH" ]] || {
   print -u2 "找不到定时脚本：$AUTOSL_PATH"
@@ -62,7 +63,7 @@ cat > "$tmp_plist" <<EOF
     </array>
 
     <key>StartInterval</key>
-    <integer>3600</integer>
+    <integer>$START_INTERVAL</integer>
 </dict>
 </plist>
 EOF
@@ -74,4 +75,4 @@ EOF
 print "已安装 $LABEL"
 print "脚本：$AUTOSL_PATH"
 print "日志：$AUTO_DIR/logs"
-print "周期：每 3600 秒（1 小时），每 4 次 new 注册一个 SL"
+print "周期：每 $START_INTERVAL 秒（6 小时），按 UU → UU → UU → SL 轮换，每轮执行 relog"
