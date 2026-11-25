@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,8 +56,6 @@ func logBatchResult(action string, total, failed int, extra ...any) {
 
 func (w *Worker) Start(ctx context.Context, count int) error {
 	logging.Step("注册", "开始", slog.Int("count", count))
-	checkUpdates := make(relogChecks)
-	defer checkUpdates.save()
 	var failures []error
 	for i := 0; i < count; i++ {
 		if err := ctx.Err(); err != nil {
@@ -95,9 +94,6 @@ func (w *Worker) Start(ctx context.Context, count int) error {
 				}
 			}
 			if err == nil {
-				if state.stored {
-					checkUpdates[strings.TrimSpace(state.account.Email)] = time.Now().Add(relogCheckInterval)
-				}
 				break
 			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -244,107 +240,99 @@ func (w *Worker) Renew(ctx context.Context, limit int) error {
 		return fmt.Errorf("本地账号文件 %s 中没有账号", accountsFile)
 	}
 	logging.Step("续期", "开始", slog.Int("count", len(accounts)))
-	checks := loadRelogChecks()
-	checkUpdates := make(relogChecks)
-	defer checkUpdates.save()
-	startIndex := 0
+	var scanned, attempted int
 	if limit > 0 {
-		startIndex = relogStartIndex(accounts)
+		if startIndex := relogStartIndex(accounts); startIndex > 0 {
+			accounts = slices.Concat(accounts[startIndex:], accounts[:startIndex])
+		}
+		defer func() {
+			if scanned < len(accounts) {
+				saveRelogCursor(accounts[scanned].Email)
+			}
+		}()
 	}
-	total := len(accounts)
 	var failures []error
-	var scanned, attempted, cooled int
-	for offset := range total {
+scan:
+	for batch := range slices.Chunk(accounts, scenemint.MaxRelogCheckEmails) {
+		emails := make([]string, len(batch))
+		for index, account := range batch {
+			emails[index] = strings.ToLower(strings.TrimSpace(account.Email))
+		}
+		batchLimit := len(batch)
+		if limit > 0 {
+			batchLimit = min(batchLimit, limit-attempted)
+		}
+		check, err := w.sceneMint.CheckRelogAccounts(ctx, emails, batchLimit)
+		if err != nil {
+			logging.Failure("续期", "批量查询账号", err, slog.Int("index", scanned+1), slog.Int("count", len(batch)))
+			failures = append(failures, fmt.Errorf("批量查询 SceneMint 账号：%w", err))
+			break
+		}
+		invalidEmailIndexes := check.InvalidEmailIndexes
+		candidates := check.Items
+		for index, account := range batch {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(append(failures, err)...)
+			}
+			if len(invalidEmailIndexes) > 0 && invalidEmailIndexes[0] == index {
+				invalidEmailIndexes = invalidEmailIndexes[1:]
+				err := fmt.Errorf("第 %d 个账号的邮箱格式无效", scanned+1)
+				logging.Failure("续期", "查询账号", err, slog.String("email", account.Email))
+				failures = append(failures, err)
+			} else if len(candidates) > 0 && candidates[0].Email == emails[index] {
+				candidate := candidates[0]
+				candidates = candidates[1:]
+				attempted++
+				if err := w.renewAccount(ctx, &account, scanned+1, len(accounts), candidate.Reason); err != nil {
+					if ctx.Err() != nil {
+						return errors.Join(append(failures, err)...)
+					}
+					failures = append(failures, err)
+				}
+			}
+			scanned++
+			if limit > 0 && attempted == limit {
+				break scan
+			}
+		}
+	}
+	logBatchResult("续期", scanned, len(failures), slog.Int("登录尝试", attempted))
+	return errors.Join(failures...)
+}
+
+func (w *Worker) renewAccount(ctx context.Context, account *chatgpt.Account, index, total int, reason string) error {
+	progress := []any{slog.String("email", account.Email), slog.Int("index", index), slog.Int("total", total)}
+	start := time.Now()
+	logging.Step("续期", "重新登录", append(progress, slog.String("reason", reason))...)
+	if err := w.authenticateOne(ctx, account); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		account := &accounts[(startIndex+offset)%total]
-		if limit > 0 && attempted == limit {
-			saveRelogCursor(account.Email)
-			break
+		removeReason := ""
+		switch {
+		case errors.Is(err, chatgpt.ErrAccountDeactivated):
+			removeReason = "停用账号"
+		case errors.Is(err, chatgpt.ErrMailCodeTimeout):
+			removeReason = "验证码超时账号"
 		}
-		scanned = offset + 1
-		email := strings.TrimSpace(account.Email)
-		if checks[email].After(time.Now()) {
-			cooled++
-			continue
-		}
-		progress := func(extra ...any) []any {
-			args := []any{slog.String("email", account.Email), slog.Int("index", scanned), slog.Int("total", total)}
-			return append(args, extra...)
-		}
-
-		remote, queryErr := w.sceneMint.GetByEmail(ctx, account.Email)
-		if queryErr != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
+		if removeReason != "" {
+			if removeErr := removeAccount(accountsFile, account.Email); removeErr != nil {
+				logging.Failure("续期", "移除"+removeReason, removeErr, progress...)
+				return fmt.Errorf("移除%s %s：%w", removeReason, account.Email, removeErr)
 			}
-			logging.Failure("续期", "查询账号", queryErr, progress()...)
-			failures = append(failures, fmt.Errorf("查询 SceneMint 账号 %s：%w", account.Email, queryErr))
-			continue
+			logging.Skip("续期", removeReason+"已移除", progress...)
+			return nil
 		}
-		if remote != nil {
-			switch remote.Status {
-			case "active":
-				now := time.Now()
-				if remote.TokenExpiresAt.After(now) {
-					nextCheck := now.Add(relogCheckInterval)
-					if remote.TokenExpiresAt.Before(nextCheck) {
-						nextCheck = remote.TokenExpiresAt
-					}
-					checkUpdates[email] = nextCheck
-					logging.Skip("续期", "未过期", progress()...)
-					continue
-				}
-			case "invalid", "disabled":
-			default:
-				// 不再携带 status 字段：状态值已包含在原因里，避免同一行重复。
-				logging.Failure("续期", "未知账号状态", fmt.Errorf("SceneMint 返回未知状态：%s", remote.Status), progress()...)
-				failures = append(failures, fmt.Errorf("SceneMint 账号 %s 状态未知：%s", account.Email, remote.Status))
-				continue
-			}
-		}
-
-		attempted++
-		start := time.Now()
-		logging.Step("续期", "重新登录", progress()...)
-		err = w.authenticateOne(ctx, account)
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
-			removeReason := ""
-			switch {
-			case errors.Is(err, chatgpt.ErrAccountDeactivated):
-				removeReason = "停用账号"
-			case errors.Is(err, chatgpt.ErrMailCodeTimeout):
-				removeReason = "验证码超时账号"
-			}
-			if removeReason != "" {
-				if removeErr := removeAccount(accountsFile, account.Email); removeErr != nil {
-					// 写盘失败只影响该账号，与同函数其他失败分支保持一致。
-					logging.Failure("续期", "移除"+removeReason, removeErr, progress()...)
-					failures = append(failures, fmt.Errorf("移除%s %s：%w", removeReason, account.Email, removeErr))
-					continue
-				}
-				logging.Skip("续期", removeReason+"已移除", progress()...)
-				continue
-			}
-			logging.Failure("续期", "重新登录", err, progress()...)
-			failures = append(failures, fmt.Errorf("续期账号 %s：%w", account.Email, err))
-			continue
-		}
-		if err = w.sceneMint.Upload(ctx, account.AccessToken); err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
-			logging.Failure("续期", "上传 SceneMint", err, progress()...)
-			failures = append(failures, fmt.Errorf("上传续期账号 %s：%w", account.Email, err))
-			continue
-		}
-		checkUpdates[email] = time.Now().Add(relogCheckInterval)
-		logging.Done("续期", "账号", progress(slog.Duration("duration", time.Since(start)))...)
+		logging.Failure("续期", "重新登录", err, progress...)
+		return fmt.Errorf("续期账号 %s：%w", account.Email, err)
 	}
-	logBatchResult("续期", scanned, len(failures), slog.Int("登录尝试", attempted), slog.Int("冷却跳过", cooled))
-	return errors.Join(failures...)
+	if err := w.sceneMint.Upload(ctx, account.AccessToken); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		logging.Failure("续期", "上传 SceneMint", err, progress...)
+		return fmt.Errorf("上传续期账号 %s：%w", account.Email, err)
+	}
+	logging.Done("续期", "账号", append(progress, slog.Duration("duration", time.Since(start)))...)
+	return nil
 }

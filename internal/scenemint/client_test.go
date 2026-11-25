@@ -21,11 +21,11 @@ func TestClientRequestTimeout(t *testing.T) {
 	client.http.Timeout = 10 * time.Millisecond
 
 	started := time.Now()
-	_, err = client.GetByEmail(context.Background(), "account@example.com")
+	_, err = client.CheckRelogAccounts(context.Background(), []string{"account@example.com"}, 1)
 	if err == nil {
-		t.Fatal("GetByEmail() returned nil error")
+		t.Fatal("CheckRelogAccounts() returned nil error")
 	}
 	if time.Since(started) >= 100*time.Millisecond {
-		t.Fatal("GetByEmail() did not respect the HTTP client timeout")
+		t.Fatal("CheckRelogAccounts() did not respect the HTTP client timeout")
 	}
 }

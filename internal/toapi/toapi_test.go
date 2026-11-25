@@ -2,6 +2,7 @@ package toapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +14,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"autobro/internal/chatgpt"
 	"autobro/internal/mail"
@@ -155,18 +155,31 @@ func TestRenewLimitAndRotation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := (relogChecks{first: time.Now().Add(-time.Minute)}).write(); err != nil {
-		t.Fatal(err)
+	type batchQuery struct {
+		Emails []string `json:"emails"`
+		Limit  int      `json:"limit"`
 	}
-	expiresAt := time.Now().Truncate(time.Second).Add(time.Hour)
-	var queries atomic.Int32
+	queries := make(chan batchQuery, 3)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		queries.Add(1)
-		if r.URL.Query().Get("email") == active {
-			_, _ = io.WriteString(w, `{"code":0,"data":{"items":[{"status":"active","tokenExpiresAt":"`+expiresAt.Format(time.RFC3339)+`"}]}}`)
+		if r.Method != http.MethodPost || r.URL.Path != "/api/ops/accounts/batch" {
+			t.Errorf("unexpected SceneMint request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		_, _ = io.WriteString(w, `{"code":0}`)
+		var query batchQuery
+		if err := json.NewDecoder(r.Body).Decode(&query); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		queries <- query
+		items := make([]scenemint.RelogCandidate, 0)
+		for _, email := range query.Emails {
+			if email != active && len(items) < query.Limit {
+				items = append(items, scenemint.RelogCandidate{Email: email, Reason: "missing"})
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": scenemint.RelogCheck{Items: items}})
 	}))
 	defer server.Close()
 	sceneMint, err := scenemint.NewClient(server.URL, "fixture-key")
@@ -178,11 +191,11 @@ func TestRenewLimitAndRotation(t *testing.T) {
 	for _, round := range []struct {
 		limit        int
 		wantAttempts []string
-		wantQueries  int32
+		wantQuery    batchQuery
 	}{
-		{limit: 2, wantAttempts: []string{first, second}, wantQueries: 3},
-		{limit: 2, wantAttempts: []string{third, first}, wantQueries: 2},
-		{wantAttempts: []string{first, second, third}, wantQueries: 3},
+		{limit: 2, wantAttempts: []string{first, second}, wantQuery: batchQuery{Emails: []string{active, first, second, third}, Limit: 2}},
+		{limit: 2, wantAttempts: []string{third, first}, wantQuery: batchQuery{Emails: []string{third, active, first, second}, Limit: 2}},
+		{wantAttempts: []string{first, second, third}, wantQuery: batchQuery{Emails: []string{active, first, second, third}, Limit: 4}},
 	} {
 		var attempted []string
 		auth := registrationTestFunc(func(_ context.Context, account *chatgpt.Account) (*chatgpt.Account, error) {
@@ -195,33 +208,53 @@ func TestRenewLimitAndRotation(t *testing.T) {
 		if err := worker.Renew(t.Context(), round.limit); !errors.Is(err, loginErr) {
 			t.Fatalf("Renew() error = %v, want %v", err, loginErr)
 		}
-		if !slices.Equal(attempted, round.wantAttempts) || queries.Load() != round.wantQueries {
-			t.Fatalf("attempted %v with %d queries, want %v with %d queries", attempted, queries.Load(), round.wantAttempts, round.wantQueries)
+		if !slices.Equal(attempted, round.wantAttempts) {
+			t.Fatalf("attempted %v, want %v", attempted, round.wantAttempts)
 		}
-		queries.Store(0)
-	}
-	if next := loadRelogChecks()[active]; !next.Equal(expiresAt) {
-		t.Fatalf("next check = %v, want %v", next, expiresAt)
+		if len(queries) != 1 {
+			t.Fatalf("queries = %d, want 1", len(queries))
+		}
+		query := <-queries
+		if query.Limit != round.wantQuery.Limit || !slices.Equal(query.Emails, round.wantQuery.Emails) {
+			t.Fatalf("query = %+v, want %+v", query, round.wantQuery)
+		}
 	}
 }
 
-func TestRenewUploadsTokenFromReturnedAccount(t *testing.T) {
+func TestRenewReportsInvalidEmailWhenScanned(t *testing.T) {
 	t.Chdir(t.TempDir())
-	if err := appendAccount(accountsFile, &chatgpt.Account{Email: "renew@example.com"}); err != nil {
-		t.Fatal(err)
+	const invalidEmail = "bad email"
+	for _, email := range []string{"first@example.com", "second@example.com", invalidEmail} {
+		if err := appendAccount(accountsFile, &chatgpt.Account{Email: email}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	var queries, uploads atomic.Int32
+
+	var uploads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
+		switch r.URL.Path {
+		case "/api/ops/accounts":
 			uploads.Add(1)
 			body, err := io.ReadAll(r.Body)
 			if err != nil || string(body) != `{"accessToken":"refreshed-token"}` {
 				t.Errorf("uploaded body = %q, error = %v", body, err)
 			}
-		} else {
-			queries.Add(1)
+			_, _ = io.WriteString(w, `{"code":0}`)
+		case "/api/ops/accounts/batch":
+			if uploads.Load() == 0 {
+				_, _ = io.WriteString(w, `{"code":0,"data":{"items":[{"email":"first@example.com","reason":"expired"},{"email":"second@example.com","reason":"invalid"}],"invalidEmailIndexes":[2]}}`)
+				return
+			}
+			var query struct {
+				Emails []string `json:"emails"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&query); err != nil || len(query.Emails) == 0 || query.Emails[0] != invalidEmail {
+				t.Errorf("second round emails = %v, error = %v, want %q first", query.Emails, err, invalidEmail)
+			}
+			_, _ = io.WriteString(w, `{"code":0,"data":{"items":[],"invalidEmailIndexes":[0]}}`)
+		default:
+			t.Errorf("unexpected SceneMint request: %s %s", r.Method, r.URL.Path)
 		}
-		_, _ = io.WriteString(w, `{"code":0}`)
 	}))
 	defer server.Close()
 	sceneMint, err := scenemint.NewClient(server.URL, "fixture-key")
@@ -235,18 +268,99 @@ func TestRenewUploadsTokenFromReturnedAccount(t *testing.T) {
 		return auth, func() error { return nil }, nil
 	}, sceneMint, false)
 
-	if err := worker.Renew(t.Context(), 0); err != nil {
-		t.Fatal(err)
+	if err := worker.Renew(t.Context(), 2); err != nil {
+		t.Fatalf("first round reported an unscanned email: %v", err)
 	}
-	if err := worker.Renew(t.Context(), 0); err != nil {
-		t.Fatal(err)
+	if err := worker.Renew(t.Context(), 2); err == nil || !strings.Contains(err.Error(), "第 1 个账号的邮箱格式无效") {
+		t.Fatalf("second round error = %v, want invalid email error at the cursor", err)
 	}
-	if queries.Load() != 1 || uploads.Load() != 1 {
-		t.Fatalf("queries = %d, uploads = %d; want 1 each", queries.Load(), uploads.Load())
+	if uploads.Load() != 2 {
+		t.Fatalf("uploads = %d, want 2", uploads.Load())
 	}
 }
 
-func TestStartUploadFailureDoesNotSetRelogCooldown(t *testing.T) {
+func TestRenewResumesAtFailedBatch(t *testing.T) {
+	t.Chdir(t.TempDir())
+	batchSize := scenemint.MaxRelogCheckEmails
+	emails := make([]string, batchSize+2)
+	for index := range emails {
+		emails[index] = fmt.Sprintf("account%03d@example.com", index)
+		if err := appendAccount(accountsFile, &chatgpt.Account{Email: emails[index]}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var query struct {
+			Emails []string `json:"emails"`
+			Limit  int      `json:"limit"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&query); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var wantEmails []string
+		var wantLimit int
+		var items []scenemint.RelogCandidate
+		switch calls.Add(1) {
+		case 1:
+			wantEmails, wantLimit = emails[:batchSize], 2
+			items = []scenemint.RelogCandidate{{Email: emails[0], Reason: "missing"}}
+		case 2:
+			wantEmails, wantLimit = emails[batchSize:], 1
+		case 3:
+			wantEmails = slices.Concat(emails[batchSize:], emails[:batchSize-2])
+			wantLimit = 2
+			items = []scenemint.RelogCandidate{
+				{Email: emails[batchSize], Reason: "expired"},
+				{Email: emails[batchSize+1], Reason: "invalid"},
+			}
+		default:
+			t.Error("unexpected extra batch")
+		}
+		if query.Limit != wantLimit || !slices.Equal(query.Emails, wantEmails) {
+			t.Errorf("query = %+v, want emails %v, limit %d", query, wantEmails, wantLimit)
+		}
+		if items == nil {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, `{"code":1,"message":"query unavailable"}`)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": scenemint.RelogCheck{Items: items}})
+	}))
+	defer server.Close()
+	sceneMint, err := scenemint.NewClient(server.URL, "fixture-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginErr := errors.New("login failed")
+	var attempted []string
+	auth := registrationTestFunc(func(_ context.Context, account *chatgpt.Account) (*chatgpt.Account, error) {
+		attempted = append(attempted, account.Email)
+		return nil, loginErr
+	})
+	worker := New(func() (chatgpt.Authenticator, func() error, error) {
+		return auth, func() error { return nil }, nil
+	}, sceneMint, false)
+
+	if err := worker.Renew(t.Context(), 2); !errors.Is(err, loginErr) || !strings.Contains(err.Error(), "query unavailable") {
+		t.Fatalf("Renew() error = %v, want login and query errors", err)
+	}
+	if !slices.Equal(attempted, emails[:1]) {
+		t.Fatalf("first round attempted = %v, want %v", attempted, emails[:1])
+	}
+	attempted = nil
+	if err := worker.Renew(t.Context(), 2); !errors.Is(err, loginErr) {
+		t.Fatalf("Renew() error = %v, want login error", err)
+	}
+	if !slices.Equal(attempted, emails[batchSize:]) || calls.Load() != 3 {
+		t.Fatalf("second round attempted = %v, total queries = %d", attempted, calls.Load())
+	}
+}
+
+func TestStartUploadFailureKeepsAccountForRelog(t *testing.T) {
 	t.Chdir(t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
@@ -267,8 +381,9 @@ func TestStartUploadFailureDoesNotSetRelogCooldown(t *testing.T) {
 	if err := worker.Start(t.Context(), 1); err == nil || !strings.Contains(err.Error(), "upload failed") {
 		t.Fatalf("Start() error = %v, want upload failure", err)
 	}
-	if checks := loadRelogChecks(); len(checks) != 0 {
-		t.Fatalf("unexpected cooldown after upload failure: %v", checks)
+	accounts, err := LoadStoredAccounts()
+	if err != nil || len(accounts) != 1 || accounts[0].Email != "factory@example.com" {
+		t.Fatalf("expected account to be available to relog after upload failure, err = %v", err)
 	}
 }
 
@@ -299,12 +414,8 @@ func TestStartRetriesCreatedAccountWithoutCreatingAnotherAccount(t *testing.T) {
 		return staged, func() error { return nil }, nil
 	}, sceneMint, true)
 
-	start := time.Now()
 	if err := worker.Start(context.Background(), 1); err != nil {
 		t.Fatalf("Start() error = %v", err)
-	}
-	if next := loadRelogChecks()["retry@example.com"]; next.Before(start.Add(12*time.Hour)) || next.After(time.Now().Add(12*time.Hour)) {
-		t.Fatalf("next check = %v, want a 12-hour cooldown", next)
 	}
 	staged.mu.Lock()
 	calls := staged.calls

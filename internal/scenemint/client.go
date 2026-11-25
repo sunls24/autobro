@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -19,11 +18,16 @@ type Client struct {
 }
 
 const requestTimeout = 5 * time.Minute
+const MaxRelogCheckEmails = 100
 
-type Account struct {
-	Email          string    `json:"email"`
-	TokenExpiresAt time.Time `json:"tokenExpiresAt"`
-	Status         string    `json:"status"`
+type RelogCandidate struct {
+	Email  string `json:"email"`
+	Reason string `json:"reason"`
+}
+
+type RelogCheck struct {
+	Items               []RelogCandidate `json:"items"`
+	InvalidEmailIndexes []int            `json:"invalidEmailIndexes,omitempty"`
 }
 
 func NewClient(baseURL, apiKey string) (*Client, error) {
@@ -40,45 +44,36 @@ func NewClient(baseURL, apiKey string) (*Client, error) {
 }
 
 func (c *Client) Upload(ctx context.Context, accessToken string) error {
-	body, err := json.Marshal(map[string]string{"accessToken": accessToken})
+	return c.postJSON(ctx, "/api/ops/accounts", map[string]string{"accessToken": accessToken}, nil)
+}
+
+func (c *Client) CheckRelogAccounts(ctx context.Context, emails []string, limit int) (RelogCheck, error) {
+	payload := struct {
+		Emails []string `json:"emails"`
+		Limit  int      `json:"limit"`
+	}{Emails: emails, Limit: limit}
+	var response RelogCheck
+	if err := c.postJSON(ctx, "/api/ops/accounts/batch", payload, &response); err != nil {
+		return RelogCheck{}, err
+	}
+	if response.Items == nil {
+		return RelogCheck{}, errors.New("SceneMint relog check response is missing items")
+	}
+	return response, nil
+}
+
+func (c *Client) postJSON(ctx context.Context, path string, payload, data any) error {
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/ops/accounts", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	return c.do(req, nil)
-}
 
-func (c *Client) GetByEmail(ctx context.Context, email string) (*Account, error) {
-	endpoint, err := url.Parse(c.baseURL + "/api/ops/accounts")
-	if err != nil {
-		return nil, err
-	}
-	query := endpoint.Query()
-	query.Set("email", email)
-	endpoint.RawQuery = query.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	var response struct {
-		Items []Account `json:"items"`
-	}
-	if err = c.do(req, &response); err != nil {
-		return nil, err
-	}
-	if len(response.Items) == 0 {
-		return nil, nil
-	}
-	return &response.Items[0], nil
-}
-
-func (c *Client) do(req *http.Request, data any) error {
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err

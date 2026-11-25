@@ -30,7 +30,20 @@ func relogStartIndex(accounts []chatgpt.Account) int {
 }
 
 func saveRelogCursor(email string) {
-	if err := writeRelogFile(relogCursorFile, []byte(strings.TrimSpace(email)+"\n")); err != nil {
+	if err := writeRelogCursor(email); err != nil {
 		logging.Warning("续期", "保存轮转游标失败", slog.Any("err", err))
 	}
+}
+
+func writeRelogCursor(email string) error {
+	file, err := os.CreateTemp(".", ".relog-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	_, writeErr := file.WriteString(strings.TrimSpace(email) + "\n")
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), relogCursorFile)
 }
